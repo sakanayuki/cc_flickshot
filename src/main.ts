@@ -10,6 +10,26 @@ import { ResultScene } from './scenes/result.ts';
 import type { PointerPhase, Scene, SceneContext, SceneId } from './scenes/scene.ts';
 import { TitleScene } from './scenes/title.ts';
 
+/**
+ * 起動に失敗したら画面に理由を出す。
+ *
+ * これがないと、JS が読み込めなかったときに body の背景色だけが見える
+ * 「真っ青な画面」になり、端末側では原因がまったく分からない。
+ */
+function showFatal(message: string): void {
+  const el = document.createElement('div');
+  el.setAttribute(
+    'style',
+    'position:fixed;inset:0;padding:24px;background:#FFF8EC;color:#3B2A1A;' +
+      'font:16px/1.6 system-ui,sans-serif;overflow:auto;white-space:pre-wrap;z-index:9999',
+  );
+  el.textContent = 'ゲームを開始できませんでした。\n\n' + message;
+  document.body.appendChild(el);
+}
+
+window.addEventListener('error', (e) => showFatal(String(e.message ?? e.error)));
+window.addEventListener('unhandledrejection', (e) => showFatal(String(e.reason)));
+
 const canvas = document.getElementById('game') as HTMLCanvasElement | null;
 if (!canvas) throw new Error('canvas#game が見つかりません');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -87,7 +107,10 @@ window.addEventListener('orientationchange', onResize);
 let acc = 0;
 let prev = performance.now() / 1000;
 
+let crashed = false;
+
 function frame(nowMs: number): void {
+  if (crashed) return;
   const now = nowMs / 1000;
   // タブ復帰時に一気に進めてスパイラルしないよう頭打ちにする
   acc += Math.min(now - prev, MAX_FRAME_TIME);
@@ -106,9 +129,17 @@ function frame(nowMs: number): void {
     }
   }
 
-  clearFull(ctx!, viewport, COLORS.sky);
-  applyTransform(ctx!, viewport);
-  current.render(ctx!);
+  try {
+    clearFull(ctx!, viewport, COLORS.sky);
+    applyTransform(ctx!, viewport);
+    current.render(ctx!);
+  } catch (err) {
+    // 描画で落ちるとループが止まり、塗りつぶした空色だけが残って
+    // 「真っ青な画面」に見える。何が起きたか必ず表示する
+    crashed = true;
+    showFatal(err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}` : String(err));
+    return;
+  }
 
   requestAnimationFrame(frame);
 }
