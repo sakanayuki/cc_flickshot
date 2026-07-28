@@ -1,5 +1,5 @@
 /**
- * リザルト画面。詳細設計書 §8.7。
+ * リザルト画面。詳細設計書 §7.6。
  *
  * どの結果でも責める演出はしない。
  */
@@ -7,9 +7,9 @@
 import {
   BUTTON_PADDING,
   COLORS,
-  LANE_COUNT,
   LOGICAL_W,
   RESULT_INPUT_DELAY,
+  ROW_COUNT,
   STAMP_ANIM,
   type Rect,
   type Vec2,
@@ -17,7 +17,7 @@ import {
 import { drawCheerAnimal } from '../render/animals.ts';
 import {
   drawButton,
-  drawResultMountain,
+  drawResultSteps,
   drawSky,
   drawStamp,
   drawSunAndClouds,
@@ -30,7 +30,7 @@ const AGAIN: Rect = { x: 120, y: 980, w: 480, h: 140 };
 const TO_TITLE: Rect = { x: 230, y: 1150, w: 260, h: 90 };
 
 const HEADING: Record<Outcome, string> = {
-  goal: 'やったね!',
+  win: 'やったね!',
   hole: 'おしい!',
   giveup: 'またね!',
 };
@@ -50,7 +50,7 @@ export class ResultScene implements Scene {
     this.confettiTimer = 0;
     this.pressed = null;
     this.particles.clear();
-    if (this.params.outcome === 'goal') {
+    if (this.params.outcome === 'win') {
       this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 40);
     }
   }
@@ -63,7 +63,7 @@ export class ResultScene implements Scene {
   update(dt: number): void {
     this.time += dt;
     this.particles.update(dt);
-    if (this.params?.outcome === 'goal') {
+    if (this.params?.outcome === 'win') {
       this.confettiTimer -= dt;
       if (this.confettiTimer <= 0) {
         this.confettiTimer = 0.4;
@@ -103,19 +103,19 @@ export class ResultScene implements Scene {
     drawSunAndClouds(ctx, this.time);
     if (!p) return;
 
-    const goal = p.outcome === 'goal';
+    const won = p.outcome === 'win';
 
     text(ctx, HEADING[p.outcome], LOGICAL_W / 2, 240, {
       size: 92,
-      color: goal ? COLORS.accent : COLORS.ink,
+      color: won ? COLORS.accent : COLORS.ink,
       outline: 14,
     });
 
-    drawResultMountain(ctx, { x: LOGICAL_W / 2, y: 560 }, p.reachedLane, goal);
+    drawResultSteps(ctx, { x: LOGICAL_W / 2, y: 520 }, p.reachedDepth, won);
 
     text(
       ctx,
-      goal ? `${LANE_COUNT}だんめ ゴール!` : `${p.reachedLane}だんめ まで のぼったよ`,
+      won ? `${ROW_COUNT}だん おりて あたり!` : `${p.reachedDepth}だんめ まで おりたよ`,
       LOGICAL_W / 2,
       710,
       { size: 34, color: COLORS.ink, outline: 8 },
@@ -127,7 +127,7 @@ export class ResultScene implements Scene {
     drawButton(ctx, AGAIN, 'もういちど', true, this.pressed === 'again');
     drawButton(ctx, TO_TITLE, 'さいしょから', false, this.pressed === 'title');
 
-    if (goal) this.particles.render(ctx);
+    if (won) this.particles.render(ctx);
   }
 
   /** 結果ごとのどうぶつの反応。失敗でも悲しい表現は使わない */
@@ -135,7 +135,7 @@ export class ResultScene implements Scene {
     const t = this.time;
     const cx = LOGICAL_W / 2;
     switch (p.outcome) {
-      case 'goal':
+      case 'win':
         drawCheerAnimal(ctx, 'usagi', cx - 150, 830, 92, 0.6 + Math.sin(t * 6) * 0.4);
         drawCheerAnimal(ctx, 'kuma', cx + 150, 830, 92, 0.6 + Math.sin(t * 6 + 1.2) * 0.4);
         break;
@@ -165,15 +165,15 @@ export class ResultScene implements Scene {
     }
   }
 
-  /** ゴール時のスタンプ「ぺたん!」 */
+  /** あたり時のスタンプ「ぺたん!」 */
   private renderStamp(ctx: Ctx, p: ResultParams): void {
-    if (p.outcome !== 'goal' || p.newStampIndex === null) return;
+    if (p.outcome !== 'win' || p.newStampIndex === null) return;
     const start = 0.35;
     if (this.time < start) return;
     const t = clamp01((this.time - start) / STAMP_ANIM);
     // 大きく降ってきて、ぺたんと押される
     const scale = t < 1 ? 2.4 - 1.4 * easeBack(t) : 1;
-    const center: Vec2 = { x: LOGICAL_W / 2 + 208, y: 452 };
+    const center: Vec2 = { x: LOGICAL_W / 2 + 215, y: 430 };
 
     ctx.save();
     if (t < 1) ctx.globalAlpha = 0.35 + 0.65 * t;
@@ -184,7 +184,7 @@ export class ResultScene implements Scene {
 
     if (t >= 1) {
       text(ctx, 'スタンプ ゲット!', center.x, center.y + 86, {
-        size: 26,
+        size: 22,
         color: COLORS.accent,
         outline: 7,
       });

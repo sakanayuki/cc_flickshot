@@ -1,5 +1,5 @@
 /**
- * シーンの共通インターフェース。詳細設計書 §8.1。
+ * シーンの共通インターフェース。詳細設計書 §7.1。
  */
 
 import type { DifficultyConfig, Vec2 } from '../config.ts';
@@ -7,14 +7,14 @@ import type { SaveData } from '../save.ts';
 
 export type SceneId = 'title' | 'game' | 'result';
 
-export type Outcome = 'goal' | 'hole' | 'giveup';
+export type Outcome = 'win' | 'hole' | 'giveup';
 
 export interface ResultParams {
   outcome: Outcome;
-  /** 1..5。到達した最高の段 */
-  reachedLane: number;
+  /** 1..ROW_COUNT。降りた最深の段 */
+  reachedDepth: number;
   difficulty: DifficultyConfig;
-  /** ゴール時のみ、獲得したスタンプの ANIMALS 上の index */
+  /** あたり時のみ、獲得したスタンプの ANIMALS 上の index */
   newStampIndex: number | null;
 }
 

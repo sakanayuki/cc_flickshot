@@ -62,6 +62,8 @@ const scenes: Record<SceneId, Scene> = {
 
 let current: Scene = scenes.title;
 current.enter(undefined);
+// 現在のシーンを DOM に出す。自動テストから遷移を観測するためだけのもの
+document.body.dataset.scene = 'title';
 
 function applyPendingTransition(): void {
   if (!pending) return;
@@ -70,6 +72,7 @@ function applyPendingTransition(): void {
   current.exit();
   current = scenes[id];
   current.enter(params);
+  document.body.dataset.scene = id;
 }
 
 // ---------------------------------------------------------------- 入力

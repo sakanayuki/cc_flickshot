@@ -1,5 +1,5 @@
 /**
- * セーブデータのテスト。詳細設計書 §13.6。
+ * セーブデータのテスト。詳細設計書 §12.2。
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';

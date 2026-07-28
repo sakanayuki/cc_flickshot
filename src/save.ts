@@ -1,5 +1,5 @@
 /**
- * スタンプの永続化。詳細設計書 §10。
+ * スタンプの永続化。詳細設計書 §9。
  *
  * localStorage が使えない環境(プライベートブラウズ、ストレージ無効)でも
  * 絶対にクラッシュさせない。失敗したらメモリ上だけで動作を続ける。
@@ -8,7 +8,7 @@
 import { ANIMALS, type DifficultyId } from './config.ts';
 
 export interface SaveData {
-  /** 累計ゴール回数 = 集めたスタンプの数 */
+  /** 累計あたり回数 = 集めたスタンプの数 */
   stampCount: number;
   lastDifficulty: DifficultyId;
 }

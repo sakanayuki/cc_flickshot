@@ -1,162 +1,152 @@
 /**
- * レーン・穴・ゴール・壁の定義と幾何計算。詳細設計書 §3。
+ * 盤面の幾何。段(板)と、その左右にある穴と、最下段の下のあたりの口。
  *
  * このモジュールは Canvas も DOM も参照しない。
  */
 
 import {
+  BOARD_CENTER_X,
   BOARD_LEFT,
   BOARD_RIGHT,
   COIN_R,
-  DIFFICULTIES,
-  GOAL_FLOOR_Y,
-  GOAL_LIP_TOP,
-  GOAL_LIP_X,
-  LANES,
-  LANE_SPAN,
+  PLANK_DROP,
+  ROW_COUNT,
+  ROW_GAP,
+  ROW_TOP_Y,
+  notchOffset,
   type DifficultyConfig,
-  type Hole,
-  type Lane,
+  type NotchSide,
+  type Row,
   type Vec2,
+  type WinPocket,
 } from '../config.ts';
 
-/** レーン上の位置 s (0 = 高い端、1 = レバー端) → 座標 */
-export function pointAt(lane: Lane, s: number): Vec2 {
+/**
+ * 段の板を作る。
+ *
+ * 溝は右→左→右…と交互。右の溝からは左へ、左の溝からは右へ弾く。
+ * 溝の x は板幅から導かれ(`notchOffset`)、どの遷移でも
+ * 「横に飛ぶ距離」が同じになるようになっている。
+ */
+export function buildRows(d: DifficultyConfig): Row[] {
+  const w = d.plankWidth;
+  const off = notchOffset(w);
+  const notchRight = BOARD_CENTER_X + off;
+  const notchLeft = BOARD_CENTER_X - off;
+
+  return Array.from({ length: ROW_COUNT }, (_, i): Row => {
+    const side: NotchSide = i % 2 === 0 ? 'right' : 'left';
+    const notchY = ROW_TOP_Y + i * ROW_GAP;
+    const [left, right] =
+      side === 'right' ? [notchRight - w, notchRight] : [notchLeft, notchLeft + w];
+    return { index: i, left, right, notchSide: side, notchY, highY: notchY - PLANK_DROP };
+  });
+}
+
+/** 最下段(溝は右)から左へ弾いて入れる、あたりの口 */
+export function buildWinPocket(d: DifficultyConfig): WinPocket {
+  const w = d.plankWidth;
+  const off = notchOffset(w);
+  const left = BOARD_CENTER_X - off;
   return {
-    x: lane.hi.x + (lane.lo.x - lane.hi.x) * s,
-    y: lane.hi.y + (lane.lo.y - lane.hi.y) * s,
+    left,
+    right: left + w,
+    y: ROW_TOP_Y + ROW_COUNT * ROW_GAP,
   };
 }
 
-/** s が増える向き(= 下り坂の向き)の単位接線 */
-export function tangentAt(lane: Lane): Vec2 {
-  const dx = lane.lo.x - lane.hi.x;
-  const dy = lane.lo.y - lane.hi.y;
-  const len = Math.hypot(dx, dy);
-  return { x: dx / len, y: dy / len };
+// ---------------------------------------------------------------- 板の上の幾何
+
+/** 溝(コインが止まる位置)の座標。コインの中心が来る位置 */
+export function notchPos(row: Row): Vec2 {
+  const x = row.notchSide === 'right' ? row.right : row.left;
+  return { x, y: row.notchY - COIN_R };
 }
 
-/** 上向き(y が小さくなる向き)の単位法線 */
-export function normalAt(lane: Lane): Vec2 {
-  const t = tangentAt(lane);
-  const n = { x: t.y, y: -t.x };
-  return n.y > 0 ? { x: -n.x, y: -n.y } : n;
+/** 弾き出す向き。溝が右なら左へ (-1) */
+export function flickDirX(row: Row): number {
+  return row.notchSide === 'right' ? -1 : 1;
 }
 
-/** レーン表面からの符号付き距離。正 = レーンより上 */
-export function signedDistanceToLane(lane: Lane, p: Vec2): number {
-  const n = normalAt(lane);
-  return (p.x - lane.hi.x) * n.x + (p.y - lane.hi.y) * n.y;
+/** 板が下り坂になる向き(溝へ向かう向き) */
+export function downhillDirX(row: Row): number {
+  return row.notchSide === 'right' ? 1 : -1;
 }
 
-/** x 座標 → レーン上の s。レーンの範囲外なら [0,1] の外の値を返す */
-export function sAtX(lane: Lane, x: number): number {
-  return (x - lane.hi.x) / (lane.lo.x - lane.hi.x);
+/** 板の表面の y。x が板の範囲外でも直線を延長して返す */
+export function plankSurfaceY(row: Row, x: number): number {
+  const u = (x - row.left) / (row.right - row.left);
+  // 溝が右なら右へ下る
+  return row.notchSide === 'right'
+    ? row.highY + (row.notchY - row.highY) * u
+    : row.notchY + (row.highY - row.notchY) * u;
 }
 
-/** 点をレーン上に射影したときの s */
-export function sAtPoint(lane: Lane, p: Vec2): number {
-  const dx = lane.lo.x - lane.hi.x;
-  const dy = lane.lo.y - lane.hi.y;
-  const len2 = dx * dx + dy * dy;
-  return ((p.x - lane.hi.x) * dx + (p.y - lane.hi.y) * dy) / len2;
+/** コインの中心がこの x で板に乗っているときの y */
+export function plankCoinY(row: Row, x: number): number {
+  return plankSurfaceY(row, x) - COIN_R;
 }
 
-/** レーン表面の y 座標(x がレーンの範囲内であること) */
-export function laneSurfaceY(lane: Lane, x: number): number {
-  const s = sAtX(lane, x);
-  return lane.hi.y + (lane.lo.y - lane.hi.y) * s;
+/** x が板の上か。コインの中心で判定する */
+export function onPlank(row: Row, x: number): boolean {
+  return x >= row.left && x <= row.right;
 }
 
-/** レーンが x をカバーしているか */
-export function laneCoversX(lane: Lane, x: number): boolean {
-  const lo = Math.min(lane.hi.x, lane.lo.x);
-  const hi = Math.max(lane.hi.x, lane.lo.x);
-  return x >= lo && x <= hi;
-}
-
-/** レバー端の向き。右レバーなら +1(x が増える向きが下り) */
-export function downhillSignX(lane: Lane): number {
-  return lane.lo.x > lane.hi.x ? 1 : -1;
-}
-
-/** 弾く向き(盤面内側)。右レバーなら -1(左向き) */
-export function inwardSignX(lane: Lane): number {
-  return -downhillSignX(lane);
+/** あたりの口の範囲に入っているか */
+export function inWinPocket(pocket: WinPocket, x: number): boolean {
+  return x >= pocket.left && x <= pocket.right;
 }
 
 // ---------------------------------------------------------------- 穴
 
+/** 板の左右にある穴。着地に失敗するとここへ落ちる */
+export interface Hole {
+  /** どの段の高さにある穴か。ROW_COUNT ならあたりの口の高さ */
+  rowIndex: number;
+  left: number;
+  right: number;
+  y: number;
+  /** 溝から見て手前(弱すぎ)側か、奥(強すぎ)側か */
+  kind: 'near' | 'far';
+}
+
+/**
+ * すべての穴を作る。穴は「板でないところ」。
+ *
+ * 弱すぎたときに落ちる手前の穴と、強すぎたときに落ちる奥の穴の
+ * 両方が必ず存在する(片方しか無いと片側だけのゲームになる)。
+ */
 export function buildHoles(d: DifficultyConfig): Hole[] {
+  const rows = buildRows(d);
+  const pocket = buildWinPocket(d);
   const holes: Hole[] = [];
-  for (const lane of LANES) {
-    const list = d.holeS[lane.index] ?? [];
-    for (const s of list) {
-      holes.push({
-        laneIndex: lane.index,
-        s,
-        radius: d.holeRadius,
-        center: pointAt(lane, s),
-      });
+
+  // 2 段目以降と、あたりの口の高さ。1 段目は投入されるだけなので穴は要らない
+  for (let i = 1; i <= ROW_COUNT; i++) {
+    const isPocket = i === ROW_COUNT;
+    const target = isPocket
+      ? { left: pocket.left, right: pocket.right, y: pocket.y }
+      : { left: rows[i]!.left, right: rows[i]!.right, y: rows[i]!.notchY };
+    // 1 つ上の段の溝がどちら側か = どちらへ弾かれてくるか
+    const from = rows[i - 1]!;
+    const goingLeft = flickDirX(from) < 0;
+
+    // 手前(発射側)の穴と奥の穴
+    const nearSide = goingLeft
+      ? { left: target.right, right: BOARD_RIGHT, kind: 'near' as const }
+      : { left: BOARD_LEFT, right: target.left, kind: 'near' as const };
+    const farSide = goingLeft
+      ? { left: BOARD_LEFT, right: target.left, kind: 'far' as const }
+      : { left: target.right, right: BOARD_RIGHT, kind: 'far' as const };
+
+    for (const s of [nearSide, farSide]) {
+      if (s.right - s.left > 1) {
+        holes.push({ rowIndex: i, left: s.left, right: s.right, y: target.y, kind: s.kind });
+      }
     }
   }
   return holes;
 }
 
-export function holesOnLane(holes: readonly Hole[], laneIndex: number): Hole[] {
-  return holes.filter((h) => h.laneIndex === laneIndex);
-}
-
-// ---------------------------------------------------------------- ゴール
-
-export interface GoalLip {
-  x: number;
-  top: number;
-  bottom: number;
-  /** コイン中心がこの y 以下ならリップを越えられる */
-  clearY: number;
-}
-
-export function goalLip(): GoalLip {
-  const topLane = LANES[LANES.length - 1]!;
-  return {
-    x: GOAL_LIP_X,
-    top: GOAL_LIP_TOP,
-    bottom: laneSurfaceY(topLane, GOAL_LIP_X),
-    clearY: GOAL_LIP_TOP - COIN_R,
-  };
-}
-
-export interface GoalFloor {
-  y: number;
-  left: number;
-  right: number;
-  /** コイン中心がこの y に達したら着地 */
-  landY: number;
-}
-
-export function goalFloor(d: DifficultyConfig): GoalFloor {
-  return {
-    y: GOAL_FLOOR_Y,
-    left: d.goalBasketLeft,
-    right: GOAL_LIP_X,
-    landY: GOAL_FLOOR_Y - COIN_R,
-  };
-}
-
-// ---------------------------------------------------------------- 壁
-
 export const WALL_LEFT_X = BOARD_LEFT;
 export const WALL_RIGHT_X = BOARD_RIGHT;
-
-/** レーン上の距離 (px) → s の差 */
-export function pxToS(px: number): number {
-  return px / LANE_SPAN;
-}
-
-/** s の差 → レーン上の距離 (px) */
-export function sToPx(s: number): number {
-  return s * LANE_SPAN;
-}
-
-export const DEFAULT_DIFFICULTY = DIFFICULTIES.easy;

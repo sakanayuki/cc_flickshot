@@ -1,34 +1,41 @@
 /**
- * 物理と判定のテスト。詳細設計書 §13.2 〜 §13.4。
+ * 盤面と物理のテスト。
  *
- * §13.4 は本ゲームの生命線。座標や物理定数を変更したときに
- * 「5段すべてで同じ閾値が成立する」という均一性(§3.1)が壊れたことを
- * 検知できる唯一の仕組みなので、消してはならない。
+ * このゲームは「適度な強さでだけ 1 段下の板に乗れる」ことがすべてなので、
+ * 成功域の広さと、強すぎ・弱すぎの両方で落ちることを直接テストしている。
+ * ここが壊れると盤面の数字が正しくても遊べなくなる。
  */
 
 import { describe, expect, it } from 'vitest';
 import {
-  BOARD_BOTTOM,
   BOARD_LEFT,
   BOARD_RIGHT,
   BOARD_TOP,
   COIN_R,
   DIFFICULTIES,
   FIXED_DT,
-  LANES,
-  LANE_ANGLE,
+  FLICK_ZONE_PX,
+  NEAR_GAP,
   P_MAX,
   P_MIN,
+  PULL_DEADZONE,
+  ROW_COUNT,
   type DifficultyConfig,
 } from '../config.ts';
-import { buildHoles } from './board.ts';
+import {
+  buildHoles,
+  buildRows,
+  buildWinPocket,
+  flickDirX,
+  notchPos,
+  onPlank,
+} from './board.ts';
 import {
   canFlick,
-  checkHole,
   createCoin,
   flickCoin,
-  placeOnLane,
-  placeOnLaneStart,
+  placeAtStart,
+  placeOnRow,
   stepCoin,
   type Coin,
 } from './coin.ts';
@@ -36,426 +43,269 @@ import {
 const EASY = DIFFICULTIES.easy;
 const NORMAL = DIFFICULTIES.normal;
 
-/** 穴のない盤面。弾道だけを見たいときに使う */
-const NO_HOLES: DifficultyConfig = { ...EASY, holeS: [[], [], [], [], []] };
+type Outcome = 'win' | 'landed' | 'nearHole' | 'farHole' | 'stuck';
 
-interface SimResult {
-  coin: Coin;
-  landedOn: number | null;
-  reachedGoal: boolean;
-  hitHole: boolean;
-  steps: number;
-}
-
-/** レバー端に置いたコインを power で弾き、着地するまで進める */
-function simulateFlick(
-  laneIndex: number,
-  power: number,
-  d: DifficultyConfig,
-  maxSeconds = 10,
-): SimResult {
-  const coin = createCoin();
-  placeOnLane(coin, laneIndex, 1);
+function simulate(d: DifficultyConfig, rowIndex: number, power: number): Outcome {
+  const rows = buildRows(d);
+  const pocket = buildWinPocket(d);
   const holes = buildHoles(d);
-  expect(flickCoin(coin, power)).toBe(true);
-
-  let landedOn: number | null = null;
-  let reachedGoal = false;
-  let hitHole = false;
-  const maxSteps = Math.round(maxSeconds / FIXED_DT);
-  let steps = 0;
-
-  for (; steps < maxSteps; steps++) {
-    const r = stepCoin(coin, FIXED_DT, d, holes);
-    if (r.reachedGoal) {
-      reachedGoal = true;
-      break;
-    }
-    if (r.hitHole) {
-      hitHole = true;
-      break;
-    }
-    if (r.landedOnLane !== null && landedOn === null) {
-      landedOn = r.landedOnLane;
-      break;
-    }
+  const coin = createCoin();
+  placeOnRow(coin, rows, rowIndex, notchPos(rows[rowIndex]!).x);
+  if (!flickCoin(coin, rows, power)) return 'stuck';
+  for (let i = 0; i < 900; i++) {
+    const r = stepCoin(coin, FIXED_DT, rows, pocket, holes);
+    if (r.reachedWin) return 'win';
+    if (r.landedOnRow !== null) return 'landed';
+    if (r.fellInHole) return r.fellInHole.kind === 'near' ? 'nearHole' : 'farHole';
   }
-  return { coin, landedOn, reachedGoal, hitHole, steps };
+  return 'stuck';
 }
 
-/** コインが盤面内に留まっているか */
-/**
- * レーンが傾いているぶん、レバー端に静止したコインの中心は
- * 法線方向に押し出されて壁より COIN_R*sin(傾き) だけ外へ出る。
- * その分だけ許容する。
- */
-const EDGE_TOLERANCE = COIN_R * Math.sin(LANE_ANGLE) + 1;
-
-function insideBoard(coin: Coin): boolean {
-  return (
-    coin.pos.x >= BOARD_LEFT - EDGE_TOLERANCE &&
-    coin.pos.x <= BOARD_RIGHT + EDGE_TOLERANCE &&
-    coin.pos.y >= BOARD_TOP - EDGE_TOLERANCE &&
-    coin.pos.y <= BOARD_BOTTOM + EDGE_TOLERANCE
-  );
+function scanBand(d: DifficultyConfig, rowIndex: number) {
+  const ok: number[] = [];
+  let total = 0;
+  let weak = 0;
+  let strong = 0;
+  const step = 0.005;
+  for (let pull = PULL_DEADZONE; pull <= 1.0001; pull += step) {
+    total++;
+    const out = simulate(d, rowIndex, P_MIN + (P_MAX - P_MIN) * pull);
+    if (out === 'win' || out === 'landed') ok.push(pull);
+    else if (out === 'nearHole') weak++;
+    else if (out === 'farHole') strong++;
+  }
+  let gaps = 0;
+  for (let i = 1; i < ok.length; i++) if (ok[i]! - ok[i - 1]! > step * 1.5) gaps++;
+  return { frac: ok.length / total, gaps, weak, strong };
 }
 
-// ---------------------------------------------------------------- §13.2
+const ROWS = [0, 1, 2, 3, 4];
 
-describe('穴の判定 (§13.2)', () => {
-  const holes = buildHoles(EASY);
-  const lane0Hole = holes.find((h) => h.laneIndex === 0)!;
+// ---------------------------------------------------------------- 盤面
 
-  function coinAt(s: number, vs: number, laneIndex = 0): Coin {
-    const c = createCoin();
-    c.state = 'onLane';
-    c.laneIndex = laneIndex;
-    c.s = s;
-    c.vs = vs;
-    return c;
-  }
-
-  it('穴の中心・遅い → 落ちる', () => {
-    expect(checkHole(coinAt(lane0Hole.s, 100), holes, EASY.fallSpeed)).not.toBeNull();
-  });
-
-  it('穴の中心・速い → 落ちない', () => {
-    expect(checkHole(coinAt(lane0Hole.s, EASY.fallSpeed + 20), holes, EASY.fallSpeed)).toBeNull();
-  });
-
-  // 難易度差はこの閾値だけで作っている。同じ速度でも ふつう なら落ちる
-  it('やさしいなら通過する速度でも、ふつうなら落ちる', () => {
-    const between = (EASY.fallSpeed + NORMAL.fallSpeed) / 2;
-    expect(checkHole(coinAt(lane0Hole.s, between), holes, EASY.fallSpeed)).toBeNull();
-    expect(checkHole(coinAt(lane0Hole.s, between), holes, NORMAL.fallSpeed)).not.toBeNull();
-  });
-
-  it('穴の外 → 落ちない', () => {
-    const outside = lane0Hole.s + (lane0Hole.radius + 1) / 451.77;
-    expect(checkHole(coinAt(outside, 0), holes, EASY.fallSpeed)).toBeNull();
-  });
-
-  it('airborne は穴の上でも落ちない', () => {
-    const c = coinAt(lane0Hole.s, 0);
-    c.state = 'airborne';
-    expect(checkHole(c, holes, EASY.fallSpeed)).toBeNull();
-  });
-
-  it('逆走中(vs が負)でも絶対値で判定する', () => {
-    expect(checkHole(coinAt(lane0Hole.s, -100), holes, EASY.fallSpeed)).not.toBeNull();
-  });
-
-  it('別の段の穴には反応しない', () => {
-    const only0 = buildHoles({ ...EASY, holeS: [[0.85], [], [], [], []] });
-    expect(checkHole(coinAt(0.85, 0, 1), only0, EASY.fallSpeed)).toBeNull();
-    expect(checkHole(coinAt(0.85, 0, 0), only0, EASY.fallSpeed)).not.toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------- §13.3
-
-describe('弾きゾーン (§13.3)', () => {
-  function coinAt(s: number, laneIndex = 0): Coin {
-    const c = createCoin();
-    c.state = 'onLane';
-    c.laneIndex = laneIndex;
-    c.s = s;
-    return c;
-  }
-
-  it('s = 0.9 は弾ける', () => expect(canFlick(coinAt(0.9), 0)).toBe(true));
-  it('s = 0.70 は弾ける(境界を含む)', () => expect(canFlick(coinAt(0.7), 0)).toBe(true));
-  it('s = 1.0 は弾ける(境界を含む)', () => expect(canFlick(coinAt(1.0), 0)).toBe(true));
-  it('s = 0.69 は弾けない', () => expect(canFlick(coinAt(0.69), 0)).toBe(false));
-  it('別の段は弾けない', () => expect(canFlick(coinAt(0.9, 1), 0)).toBe(false));
-
-  it('airborne は弾けない', () => {
-    const c = coinAt(0.9);
-    c.state = 'airborne';
-    expect(canFlick(c, 0)).toBe(false);
-    expect(flickCoin(c, 1200)).toBe(false);
-  });
-
-  it('ゾーン外では flickCoin が false を返し状態を変えない', () => {
-    const c = coinAt(0.5);
-    expect(flickCoin(c, 1200)).toBe(false);
-    expect(c.state).toBe('onLane');
-  });
-});
-
-// ---------------------------------------------------------------- §13.4
-
-describe('弾道と着地 (§13.4)', () => {
-  it('段1: 閾値 915 で段2に着地する', () => {
-    const r = simulateFlick(0, 915, NO_HOLES);
-    expect(r.landedOn).toBe(1);
-  });
-
-  it('段1: 900 では段2に届かず段1に戻る', () => {
-    const r = simulateFlick(0, 900, NO_HOLES);
-    expect(r.landedOn).toBe(0);
-  });
-
-  it('段1: 最大パワー 1700 でも失敗せず、段2以上に着地する', () => {
-    const r = simulateFlick(0, 1700, NO_HOLES);
-    expect(r.landedOn).not.toBeNull();
-    expect(r.landedOn!).toBeGreaterThanOrEqual(1);
-  });
-
-  // これが §3.1「5つの跳躍の均一性」の回帰テスト
-  it.each([0, 1, 2, 3])('段%i: 閾値 915 で必ず次の段に着地する(均一性)', (i) => {
-    const r = simulateFlick(i, 915, NO_HOLES);
-    expect(r.landedOn).toBe(i + 1);
-  });
-
-  it.each([0, 1, 2, 3])('段%i: 900 では次の段に届かない(均一性)', (i) => {
-    const r = simulateFlick(i, 900, NO_HOLES);
-    expect(r.landedOn).toBe(i);
-  });
-
-  it('段5: やさしい・power 1000 でゴールする', () => {
-    const r = simulateFlick(4, 1000, { ...NO_HOLES, goalBasketLeft: EASY.goalBasketLeft });
-    expect(r.reachedGoal).toBe(true);
-  });
-
-  it('段5: やさしい・最大パワーでもゴールする', () => {
-    const r = simulateFlick(4, 1700, { ...NO_HOLES, goalBasketLeft: EASY.goalBasketLeft });
-    expect(r.reachedGoal).toBe(true);
-  });
-
-  it('段5: ふつう・power 1600 はゴールを外して段5に戻る', () => {
-    const d: DifficultyConfig = {
-      ...NORMAL,
-      holeS: [[], [], [], [], []],
-      lipEscapeSpeed: null,
-    };
-    const r = simulateFlick(4, 1600, d);
-    expect(r.reachedGoal).toBe(false);
-    expect(r.landedOn).toBe(4);
-  });
-
-  it('段5: 弱すぎる弾きはゴールを外して段5に戻る(失敗にならない)', () => {
-    const r = simulateFlick(4, 700, { ...NO_HOLES, goalBasketLeft: EASY.goalBasketLeft });
-    expect(r.reachedGoal).toBe(false);
-    expect(r.landedOn).toBe(4);
-  });
-
-  it('どのパワーでもコインは盤面の外に出ない', () => {
-    for (let power = 620; power <= 1700; power += 20) {
-      for (let lane = 0; lane < LANES.length; lane++) {
-        const coin = createCoin();
-        placeOnLane(coin, lane, 1);
-        flickCoin(coin, power);
-        for (let i = 0; i < 600; i++) {
-          stepCoin(coin, FIXED_DT, NO_HOLES, []);
-          if (!insideBoard(coin)) {
-            throw new Error(
-              `盤面外: lane=${lane} power=${power} step=${i} ` +
-                `pos=(${coin.pos.x.toFixed(1)}, ${coin.pos.y.toFixed(1)})`,
-            );
-          }
-        }
-      }
+describe('盤面の幾何', () => {
+  it.each([EASY, NORMAL])('$label: 板が盤面に収まる', (d) => {
+    for (const r of buildRows(d)) {
+      expect(r.left).toBeGreaterThanOrEqual(BOARD_LEFT);
+      expect(r.right).toBeLessThanOrEqual(BOARD_RIGHT);
     }
   });
 
-  /**
-   * これは弾き角(FLICK_ANGLE_DEG)を守るためのテスト。
-   *
-   * シャフトの上は「2段上のレーンの裏面」で塞がれているため、弾き角が浅いと
-   * コインが次の段の先端を越える前に天井にぶつかって戻される。
-   * 20 度では成功域がストロークの 2% しかなくなり、事実上プレイ不能になる。
-   * 26 度で 73% に回復する。放物線の計算だけでは見えないので、実際に回して測る。
-   */
-  it.each([0, 1, 2, 3, 4])('段%i: 弾き力の 40%% 以上で前進できる(弾き角の回帰テスト)', (lane) => {
-    let ok = 0;
-    let total = 0;
-    for (let power = P_MIN; power <= P_MAX; power += 10) {
-      total++;
-      const r = simulateFlick(lane, power, NO_HOLES);
-      if (r.reachedGoal || (r.landedOn !== null && r.landedOn > lane)) ok++;
-    }
-    expect(ok / total).toBeGreaterThanOrEqual(0.4);
+  it.each([EASY, NORMAL])('$label: 溝が右→左と交互になる', (d) => {
+    const sides = buildRows(d).map((r) => r.notchSide);
+    expect(sides).toEqual(['right', 'left', 'right', 'left', 'right']);
   });
 
-  it('5段すべてで前進に必要な最小パワーが一致する(均一性)', () => {
-    const thresholds = [0, 1, 2, 3, 4].map((lane) => {
-      for (let power = P_MIN; power <= P_MAX; power += 5) {
-        const r = simulateFlick(lane, power, NO_HOLES);
-        if (r.reachedGoal || (r.landedOn !== null && r.landedOn > lane)) return power;
-      }
-      return -1;
+  it.each([EASY, NORMAL])('$label: 5つの遷移がすべて同じ横距離・落差', (d) => {
+    const rows = buildRows(d);
+    const pocket = buildWinPocket(d);
+    const jumps = rows.map((row, i) => {
+      const dir = flickDirX(row);
+      const t =
+        i + 1 < ROW_COUNT
+          ? { near: dir < 0 ? rows[i + 1]!.right : rows[i + 1]!.left, y: rows[i + 1]!.notchY }
+          : { near: dir < 0 ? pocket.right : pocket.left, y: pocket.y };
+      return [Math.abs(notchPos(row).x - t.near), t.y - row.notchY];
     });
-    expect(thresholds.every((t) => t > 0)).toBe(true);
-    expect(Math.max(...thresholds) - Math.min(...thresholds)).toBeLessThanOrEqual(10);
-  });
-
-  it('必要な最小パワーは pull 0.35 以下に収まる(3歳児が届く)', () => {
-    for (let power = P_MIN; power <= P_MAX; power += 5) {
-      const r = simulateFlick(0, power, NO_HOLES);
-      if (r.landedOn === 1) {
-        expect((power - P_MIN) / (P_MAX - P_MIN)).toBeLessThanOrEqual(0.35);
-        return;
-      }
+    for (const j of jumps) {
+      expect(j[0]).toBeCloseTo(jumps[0]![0]!, 6);
+      expect(j[1]).toBeCloseTo(jumps[0]![1]!, 6);
     }
-    throw new Error('どのパワーでも段2に到達しない');
   });
 
-  it('状態は常に 4 つのいずれかで、pos に NaN が入らない', () => {
-    const holes = buildHoles(NORMAL);
-    const coin = createCoin();
-    placeOnLaneStart(coin);
-    flickCoin(coin, 1200);
-    const valid = new Set(['onLane', 'airborne', 'falling', 'goal']);
-    for (let i = 0; i < 3000; i++) {
-      stepCoin(coin, FIXED_DT, NORMAL, holes);
-      expect(valid.has(coin.state)).toBe(true);
-      expect(Number.isFinite(coin.pos.x)).toBe(true);
-      expect(Number.isFinite(coin.pos.y)).toBe(true);
+  // 手前の穴が無いと「弱すぎ」で落ちる余地が消える
+  it.each([EASY, NORMAL])('$label: 溝と板の間に手前の穴がある', (d) => {
+    const rows = buildRows(d);
+    const gap = Math.abs(notchPos(rows[0]!).x - rows[1]!.right);
+    expect(gap).toBeCloseTo(NEAR_GAP, 6);
+    expect(gap).toBeGreaterThan(COIN_R);
+  });
+
+  it.each([EASY, NORMAL])('$label: 各段に手前と奥の両方の穴がある', (d) => {
+    const holes = buildHoles(d);
+    for (let i = 1; i <= ROW_COUNT; i++) {
+      const at = holes.filter((h) => h.rowIndex === i);
+      expect(at.some((h) => h.kind === 'near')).toBe(true);
+      expect(at.some((h) => h.kind === 'far')).toBe(true);
+    }
+  });
+
+  it('やさしいの板はふつうより広い', () => {
+    expect(EASY.plankWidth).toBeGreaterThan(NORMAL.plankWidth);
+  });
+});
+
+// ---------------------------------------------------------------- 弾く
+
+describe('弾く', () => {
+  it('溝にいるコインは弾ける', () => {
+    const rows = buildRows(EASY);
+    const c = createCoin();
+    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+    expect(canFlick(c, rows)).toBe(true);
+  });
+
+  it('溝から離れていると弾けない', () => {
+    const rows = buildRows(EASY);
+    const c = createCoin();
+    const notch = notchPos(rows[0]!);
+    placeOnRow(c, rows, 0, notch.x - (FLICK_ZONE_PX + 10));
+    expect(canFlick(c, rows)).toBe(false);
+    expect(flickCoin(c, rows, 600)).toBe(false);
+    expect(c.state).toBe('onPlank');
+  });
+
+  it('空中のコインは弾けない', () => {
+    const rows = buildRows(EASY);
+    const c = createCoin();
+    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+    flickCoin(c, rows, 600);
+    expect(c.state).toBe('airborne');
+    expect(canFlick(c, rows)).toBe(false);
+  });
+
+  it('溝が右の段は左へ、左の段は右へ弾かれる', () => {
+    const rows = buildRows(EASY);
+    for (const row of rows) {
+      const c = createCoin();
+      placeOnRow(c, rows, row.index, notchPos(row).x);
+      flickCoin(c, rows, 600);
+      expect(Math.sign(c.vel.x)).toBe(flickDirX(row));
     }
   });
 });
 
 // ---------------------------------------------------------------- 転がり
 
-describe('レーン上の転がり (§4.2)', () => {
-  it('静止したコインは下り方向へ転がり、レバー端の壁で止まる', () => {
-    const coin = createCoin();
-    placeOnLaneStart(coin);
-    for (let i = 0; i < 600; i++) stepCoin(coin, FIXED_DT, NO_HOLES, []);
-    expect(coin.state).toBe('onLane');
-    expect(coin.s).toBe(1);
-    expect(coin.vs).toBe(0);
-  });
-
-  it('レバー端で止まったコインは弾ける', () => {
-    const coin = createCoin();
-    placeOnLaneStart(coin);
-    for (let i = 0; i < 600; i++) stepCoin(coin, FIXED_DT, NO_HOLES, []);
-    expect(canFlick(coin, 0)).toBe(true);
-  });
-
-  it('やさしい: 転落しない', () => {
-    const d: DifficultyConfig = { ...EASY, holeS: [[], [], [], [], []] };
-    const coin = createCoin();
-    placeOnLane(coin, 2, 0);
+describe('板の上の転がり', () => {
+  it.each([EASY, NORMAL])('$label: 投入後は溝まで転がって止まり、弾ける', (d) => {
+    const rows = buildRows(d);
+    const pocket = buildWinPocket(d);
+    const holes = buildHoles(d);
+    const c = createCoin();
+    placeAtStart(c, rows);
     for (let i = 0; i < 600; i++) {
-      const r = stepCoin(coin, FIXED_DT, d, []);
-      expect(r.fellToLane).toBeNull();
+      expect(stepCoin(c, FIXED_DT, rows, pocket, holes).fellInHole).toBeNull();
     }
-    expect(coin.laneIndex).toBe(2);
+    expect(c.state).toBe('onPlank');
+    expect(c.vx).toBe(0);
+    expect(c.x).toBeCloseTo(notchPos(rows[0]!).x, 6);
+    expect(canFlick(c, rows)).toBe(true);
   });
 
-  it('コインの中心はレーン表面から COIN_R だけ浮いている', () => {
-    const coin = createCoin();
-    placeOnLaneStart(coin);
-    const lane = LANES[0]!;
-    for (let i = 0; i < 120; i++) stepCoin(coin, FIXED_DT, NO_HOLES, []);
-    // レーンに沿った直線からの距離が COIN_R であること
-    const dx = lane.lo.x - lane.hi.x;
-    const dy = lane.lo.y - lane.hi.y;
-    const len = Math.hypot(dx, dy);
-    const dist = Math.abs(
-      ((coin.pos.x - lane.hi.x) * dy - (coin.pos.y - lane.hi.y) * dx) / len,
-    );
-    expect(dist).toBeCloseTo(COIN_R, 5);
+  it('着地したコインは溝へ向かって転がる', () => {
+    const rows = buildRows(EASY);
+    const pocket = buildWinPocket(EASY);
+    const holes = buildHoles(EASY);
+    const c = createCoin();
+    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+    flickCoin(c, rows, 600);
+    let landed = false;
+    for (let i = 0; i < 900 && !landed; i++) {
+      landed = stepCoin(c, FIXED_DT, rows, pocket, holes).landedOnRow !== null;
+    }
+    expect(landed).toBe(true);
+    for (let i = 0; i < 600; i++) stepCoin(c, FIXED_DT, rows, pocket, holes);
+    expect(c.x).toBeCloseTo(notchPos(rows[1]!).x, 6);
   });
 });
 
-// ---------------------------------------------------------------- 実プレイの安全性
+// ---------------------------------------------------------------- 成功域
 
-/**
- * 「盤面の数字は正しいのに遊べない」不具合を防ぐためのテスト。
- *
- * 実際にこの3つの不具合を作り込んでしまったので、そのまま回帰テストにしてある:
- *  - ふつうで、一度も弾く前にコインが段1の穴へ落ちる
- *  - ふつうで、ほどほどの強さで弾くたびに毎回1段下へ転落する
- *  - 弾きに成功したコインが穴に落ちる
- */
-describe('実プレイの安全性', () => {
-  /** 与えたシナリオで、穴の位置を通過するときの最も遅い速度 */
-  function slowestAtHoles(setup: (c: Coin) => void, d: DifficultyConfig): number {
-    const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []], lipEscapeSpeed: null };
-    const c = createCoin();
-    setup(c);
-    let slowest = Infinity;
-    const holeS = d.holeS.flat();
-    for (let i = 0; i < 900; i++) {
-      stepCoin(c, FIXED_DT, flat, []);
-      if (c.state !== 'onLane') continue;
-      for (const hs of holeS) {
-        if (Math.abs(c.s - hs) < 0.02) slowest = Math.min(slowest, Math.abs(c.vs));
+describe('成功域(ゲームの根幹)', () => {
+  it.each(ROWS)('やさしい 段%i: 成功域が 60% 以上で連続している', (row) => {
+    const b = scanBand(EASY, row);
+    expect(b.frac).toBeGreaterThanOrEqual(0.6);
+    expect(b.gaps).toBe(0);
+  });
+
+  it.each(ROWS)('ふつう 段%i: 成功域が 30〜50%', (row) => {
+    const b = scanBand(NORMAL, row);
+    expect(b.frac).toBeGreaterThanOrEqual(0.3);
+    expect(b.frac).toBeLessThanOrEqual(0.5);
+    expect(b.gaps).toBe(0);
+  });
+
+  // 片側しか失敗しないなら板が壁に接していて設計が崩れている
+  it.each([EASY, NORMAL])('$label: どの段でも強すぎ・弱すぎの両方で落ちる', (d) => {
+    for (const row of ROWS) {
+      const b = scanBand(d, row);
+      expect(b.weak, `段${row + 1} の弱すぎ失敗`).toBeGreaterThan(0);
+      expect(b.strong, `段${row + 1} の強すぎ失敗`).toBeGreaterThan(0);
+    }
+  });
+
+  it('やさしいの方がふつうより成功域が広い', () => {
+    for (const row of ROWS) {
+      expect(scanBand(EASY, row).frac).toBeGreaterThan(scanBand(NORMAL, row).frac);
+    }
+  });
+
+  it('弱く弾くと手前の穴、強く弾くと奥の穴に落ちる', () => {
+    expect(simulate(EASY, 0, P_MIN + (P_MAX - P_MIN) * 0.06)).toBe('nearHole');
+    expect(simulate(EASY, 0, P_MAX)).toBe('farHole');
+  });
+
+  it('最下段から適度に弾くとあたりの口に入る', () => {
+    const mid = P_MIN + (P_MAX - P_MIN) * 0.4;
+    expect(simulate(EASY, ROW_COUNT - 1, mid)).toBe('win');
+  });
+});
+
+// ---------------------------------------------------------------- 頑健性
+
+describe('頑健性', () => {
+  it.each([EASY, NORMAL])('$label: どのパワーでもコインが盤面外に出ない', (d) => {
+    const rows = buildRows(d);
+    const pocket = buildWinPocket(d);
+    const holes = buildHoles(d);
+    for (let row = 0; row < ROW_COUNT; row++) {
+      for (let power = P_MIN; power <= P_MAX; power += 25) {
+        const c = createCoin();
+        placeOnRow(c, rows, row, notchPos(rows[row]!).x);
+        flickCoin(c, rows, power);
+        for (let i = 0; i < 300; i++) {
+          stepCoin(c, FIXED_DT, rows, pocket, holes);
+          if (c.state === 'falling' || c.state === 'win') break;
+          expect(Number.isFinite(c.pos.x) && Number.isFinite(c.pos.y)).toBe(true);
+          expect(c.pos.x).toBeGreaterThanOrEqual(BOARD_LEFT + COIN_R - 1);
+          expect(c.pos.x).toBeLessThanOrEqual(BOARD_RIGHT - COIN_R + 1);
+          expect(c.pos.y).toBeGreaterThanOrEqual(BOARD_TOP - 1);
+        }
       }
     }
-    return slowest;
-  }
+  });
 
-  function fellALevel(power: number, d: DifficultyConfig): boolean {
-    const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []] };
+  it('状態は常に 4 つのいずれか', () => {
+    const rows = buildRows(NORMAL);
+    const pocket = buildWinPocket(NORMAL);
+    const holes = buildHoles(NORMAL);
+    const valid = new Set<Coin['state']>(['onPlank', 'airborne', 'falling', 'win']);
     const c = createCoin();
-    placeOnLane(c, 1, 1);
-    flickCoin(c, power);
-    for (let i = 0; i < 900; i++) {
-      if (stepCoin(c, FIXED_DT, flat, []).fellToLane !== null) return true;
+    placeAtStart(c, rows);
+    flickCoin(c, rows, 600);
+    for (let i = 0; i < 2000; i++) {
+      stepCoin(c, FIXED_DT, rows, pocket, holes);
+      expect(valid.has(c.state)).toBe(true);
     }
-    return false;
-  }
+  });
 
-  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
-    '$label: 投入直後、一度も弾く前に穴へ落ちない',
-    (d) => {
-      const holes = buildHoles(d);
+  it('着地した位置は必ず板の上', () => {
+    const rows = buildRows(EASY);
+    const pocket = buildWinPocket(EASY);
+    const holes = buildHoles(EASY);
+    for (let power = P_MIN; power <= P_MAX; power += 10) {
       const c = createCoin();
-      placeOnLaneStart(c);
+      placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+      flickCoin(c, rows, power);
       for (let i = 0; i < 900; i++) {
-        expect(stepCoin(c, FIXED_DT, d, holes).hitHole).toBeNull();
+        const r = stepCoin(c, FIXED_DT, rows, pocket, holes);
+        if (r.landedOnRow !== null) {
+          expect(onPlank(rows[r.landedOnRow]!, c.x)).toBe(true);
+          break;
+        }
+        if (r.fellInHole) break;
       }
-    },
-  );
-
-  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
-    '$label: 投入直後の転がりは落下閾値に 1 割以上の余裕がある',
-    (d) => {
-      expect(slowestAtHoles((c) => placeOnLaneStart(c), d)).toBeGreaterThan(d.fallSpeed * 1.1);
-    },
-  );
-
-  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
-    '$label: 弾きに成功したコインは穴を通過する',
-    (d) => {
-      const speed = slowestAtHoles((c) => {
-        placeOnLane(c, 0, 1);
-        flickCoin(c, 1100);
-      }, d);
-      expect(speed).toBeGreaterThan(d.fallSpeed);
-    },
-  );
-
-  it('ふつう: 弱い弾きで戻ったコインは穴に落ちる(ここが難易度差)', () => {
-    const speed = slowestAtHoles((c) => {
-      placeOnLane(c, 0, 1);
-      flickCoin(c, 800);
-    }, NORMAL);
-    expect(speed).toBeLessThan(NORMAL.fallSpeed);
-  });
-
-  it('やさしい: 弱い弾きで戻っても穴を通過する', () => {
-    const speed = slowestAtHoles((c) => {
-      placeOnLane(c, 0, 1);
-      flickCoin(c, 800);
-    }, EASY);
-    expect(speed).toBeGreaterThan(EASY.fallSpeed);
-  });
-
-  it('ふつう: ほどほどの弾きでは転落しない', () => {
-    expect(fellALevel(1200, NORMAL)).toBe(false);
-  });
-
-  it('ふつう: 引きすぎると転落する', () => {
-    expect(fellALevel(P_MAX, NORMAL)).toBe(true);
-  });
-
-  it('やさしい: 最大パワーでも転落しない', () => {
-    expect(fellALevel(P_MAX, EASY)).toBe(false);
+    }
   });
 });

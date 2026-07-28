@@ -1,5 +1,5 @@
 /**
- * 紙吹雪。詳細設計書 §9.4。
+ * 紙吹雪。詳細設計書 §8.4。
  */
 
 import { LOGICAL_H, type Vec2 } from '../config.ts';

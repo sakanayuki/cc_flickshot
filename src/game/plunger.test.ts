@@ -1,5 +1,5 @@
 /**
- * プランジャーのテスト。詳細設計書 §13.1。
+ * プランジャーのテスト。詳細設計書 §12.2。
  */
 
 import { describe, expect, it } from 'vitest';

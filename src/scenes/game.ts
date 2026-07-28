@@ -1,9 +1,10 @@
 /**
- * ゲーム画面。詳細設計書 §8.3 〜 §8.6。
+ * ゲーム画面。コインは右上から入り、5 段を降りて、あたりの口を目指す。
  */
 
 import {
   COIN_R,
+  COLORS,
   DIFFICULTIES,
   FALL_ANIM,
   GIVEUP_CANCEL_R,
@@ -11,21 +12,21 @@ import {
   GIVEUP_HOLD,
   GIVEUP_R,
   GIVEUP_RING_DELAY,
-  GOAL_ANIM,
   GUIDE_IDLE_DELAY,
   INSERT_ANIM,
-  LANES,
-  COLORS,
+  ROW_COUNT,
+  WIN_ANIM,
   type DifficultyConfig,
-  type Hole,
+  type Row,
   type Vec2,
+  type WinPocket,
 } from '../config.ts';
-import { buildHoles } from '../game/board.ts';
+import { buildHoles, buildRows, buildWinPocket, type Hole } from '../game/board.ts';
 import {
   canFlick,
   createCoin,
   flickCoin,
-  placeOnLaneStart,
+  placeAtStart,
   stepCoin,
   type Coin,
 } from '../game/coin.ts';
@@ -40,23 +41,23 @@ import {
   type PlungerState,
 } from '../game/plunger.ts';
 import {
+  drawBoardBackground,
   drawBoardFrame,
   drawCabinet,
   drawCoin,
-  drawPlunger,
   drawCoinSlot,
+  drawEntryChute,
   drawGiveUpButton,
-  drawGoalBasket,
   drawHandGuide,
   drawHole,
-  drawEntryChute,
   drawInsertCoin,
-  drawLane,
   drawLever,
-  drawMountain,
+  drawPlank,
+  drawPlunger,
   drawSideAnimals,
   drawSky,
   drawSunAndClouds,
+  drawWinPocket,
 } from '../render/drawings.ts';
 import { clamp01, dist, easeOut, lerp, text, type Ctx } from '../render/shapes.ts';
 import { stampIndexFor } from '../save.ts';
@@ -64,33 +65,28 @@ import type { GameParams, Outcome, PointerPhase, Scene, SceneContext } from './s
 
 type GamePhase = 'insert' | 'play' | 'ending';
 
-/** 各穴のモグラの待機アニメ */
-interface MoleState {
-  timer: number;
-  up: number;
-  showing: boolean;
-}
-
 export class GameScene implements Scene {
   private difficulty: DifficultyConfig = DIFFICULTIES.easy;
+  private rows: Row[] = [];
+  private pocket: WinPocket = { left: 0, right: 0, y: 0 };
+  private holes: Hole[] = [];
+
   private phase: GamePhase = 'insert';
   private phaseTime = 0;
   private time = 0;
 
   private coin: Coin = createCoin();
-  private holes: Hole[] = [];
   private plunger: PlungerState = createPlunger();
   private levers: LeverState[] = createLevers();
-  private moles: MoleState[] = [];
 
-  private reachedLane = 1;
+  /** 何段目まで降りたか (1..ROW_COUNT) */
+  private depth = 1;
   private outcome: Outcome | null = null;
   private endingTimer = 0;
 
   private giveUpHold = 0;
   private giveUpPointerId: number | null = null;
   private flagWave = 0;
-
   private debug = false;
 
   constructor(private app: SceneContext) {
@@ -100,12 +96,9 @@ export class GameScene implements Scene {
   enter(params: unknown): void {
     const p = params as GameParams | undefined;
     this.difficulty = p?.difficulty ?? DIFFICULTIES[this.app.save.lastDifficulty];
+    this.rows = buildRows(this.difficulty);
+    this.pocket = buildWinPocket(this.difficulty);
     this.holes = buildHoles(this.difficulty);
-    this.moles = this.holes.map(() => ({
-      timer: Math.random() * 4 + 1,
-      up: 0,
-      showing: false,
-    }));
 
     this.phase = 'insert';
     this.phaseTime = 0;
@@ -113,11 +106,12 @@ export class GameScene implements Scene {
     this.coin = createCoin();
     this.plunger = createPlunger();
     this.levers = createLevers();
-    this.reachedLane = 1;
+    this.depth = 1;
     this.outcome = null;
     this.endingTimer = 0;
     this.giveUpHold = 0;
     this.giveUpPointerId = null;
+    this.flagWave = 0;
   }
 
   exit(): void {
@@ -129,25 +123,22 @@ export class GameScene implements Scene {
   update(dt: number): void {
     this.time += dt;
     this.phaseTime += dt;
-    this.updateMoles(dt);
+    this.flagWave += dt;
     updatePlunger(this.plunger, dt);
-    if (this.coin.state === 'goal') this.flagWave += dt;
 
     switch (this.phase) {
       case 'insert':
         if (this.phaseTime >= INSERT_ANIM) {
-          placeOnLaneStart(this.coin);
+          placeAtStart(this.coin, this.rows);
           this.phase = 'play';
           this.phaseTime = 0;
         }
         break;
-
       case 'play':
         this.updatePlay(dt);
         break;
-
       case 'ending':
-        stepCoin(this.coin, dt, this.difficulty, this.holes);
+        stepCoin(this.coin, dt, this.rows, this.pocket, this.holes);
         this.endingTimer -= dt;
         if (this.endingTimer <= 0) this.finish();
         break;
@@ -157,7 +148,6 @@ export class GameScene implements Scene {
   private updatePlay(dt: number): void {
     const st = this.plunger;
 
-    // あきらめる長押し
     if (this.giveUpPointerId !== null) {
       this.giveUpHold += dt;
       if (this.giveUpHold >= GIVEUP_HOLD) {
@@ -169,31 +159,17 @@ export class GameScene implements Scene {
 
     updateLevers(this.levers, dt, st.grabbed ? st.pull : st.visualPull);
 
-    const r = stepCoin(this.coin, dt, this.difficulty, this.holes);
-
-    if (this.coin.state === 'onLane') {
-      this.reachedLane = Math.max(this.reachedLane, this.coin.laneIndex + 1);
+    const r = stepCoin(this.coin, dt, this.rows, this.pocket, this.holes);
+    if (this.coin.state === 'onPlank') {
+      this.depth = Math.max(this.depth, this.coin.rowIndex + 1);
     }
-    if (r.hitHole) {
+    if (r.fellInHole) {
       this.beginEnding('hole');
       return;
     }
-    if (r.reachedGoal) {
-      this.reachedLane = LANES.length;
-      this.beginEnding('goal');
-      return;
-    }
-  }
-
-  private updateMoles(dt: number): void {
-    for (const m of this.moles) {
-      m.timer -= dt;
-      if (m.timer <= 0) {
-        m.showing = !m.showing;
-        m.timer = m.showing ? 0.9 + Math.random() * 0.8 : 2.5 + Math.random() * 4;
-      }
-      const target = m.showing ? 1 : 0;
-      m.up += (target - m.up) * Math.min(1, dt * 7);
+    if (r.reachedWin) {
+      this.depth = ROW_COUNT;
+      this.beginEnding('win');
     }
   }
 
@@ -202,23 +178,21 @@ export class GameScene implements Scene {
     this.phase = 'ending';
     this.phaseTime = 0;
     releasePlunger(this.plunger);
-    this.endingTimer = outcome === 'hole' ? FALL_ANIM : outcome === 'goal' ? GOAL_ANIM : 0;
+    this.endingTimer = outcome === 'hole' ? FALL_ANIM : outcome === 'win' ? WIN_ANIM : 0;
   }
 
   private finish(): void {
     const outcome = this.outcome ?? 'giveup';
     let newStampIndex: number | null = null;
-
-    if (outcome === 'goal') {
+    if (outcome === 'win') {
       const nth = this.app.save.stampCount + 1;
       newStampIndex = stampIndexFor(nth);
       // リザルトに入る瞬間に保存する。演出中にリロードされても記録が残る
       this.app.commitSave({ stampCount: nth });
     }
-
     this.app.goTo('result', {
       outcome,
-      reachedLane: this.reachedLane,
+      reachedDepth: this.depth,
       difficulty: this.difficulty,
       newStampIndex,
     });
@@ -226,7 +200,7 @@ export class GameScene implements Scene {
 
   // ------------------------------------------------------------ 入力
 
-  onPointer(phase: PointerPhase, p: Vec2, pointerId: number, ev: PointerEvent): void {
+  onPointer(phase: PointerPhase, p: Vec2, pointerId: number): void {
     if (this.phase !== 'play') return;
 
     switch (phase) {
@@ -234,27 +208,15 @@ export class GameScene implements Scene {
         if (dist(p, GIVEUP_CENTER) <= GIVEUP_R && this.giveUpPointerId === null) {
           this.giveUpPointerId = pointerId;
           this.giveUpHold = 0;
-          try {
-            this.app.canvas.setPointerCapture(pointerId);
-          } catch {
-            /* 一部環境では失敗しうる。捕捉できなくても動作は続く */
-          }
+          this.capture(pointerId);
           return;
         }
         if (this.plunger.cooldown > 0) return;
-        if (plungerPointerDown(this.plunger, p, pointerId)) {
-          try {
-            this.app.canvas.setPointerCapture(pointerId);
-          } catch {
-            /* 同上 */
-          }
-        }
+        if (plungerPointerDown(this.plunger, p, pointerId)) this.capture(pointerId);
         break;
       }
-
       case 'move': {
         if (pointerId === this.giveUpPointerId) {
-          // 指がボタンから大きく離れたらキャンセル
           if (dist(p, GIVEUP_CENTER) > GIVEUP_CANCEL_R) {
             this.giveUpPointerId = null;
             this.giveUpHold = 0;
@@ -264,7 +226,6 @@ export class GameScene implements Scene {
         if (pointerId === this.plunger.pointerId) plungerPointerMove(this.plunger, p);
         break;
       }
-
       case 'up':
       case 'cancel': {
         if (pointerId === this.giveUpPointerId) {
@@ -274,16 +235,22 @@ export class GameScene implements Scene {
         }
         if (pointerId !== this.plunger.pointerId) return;
         // pointercancel でも発射する。iOS でシステムジェスチャに割り込まれたときに
-        // 操作が無かったことにならないようにするため(詳細設計書 §6.1)
+        // 操作が無かったことにならないようにするため
         const power = plungerPointerUp(this.plunger);
         if (power !== null) {
           triggerLevers(this.levers);
-          const lane = this.coin.laneIndex;
-          if (canFlick(this.coin, lane)) flickCoin(this.coin, power);
+          flickCoin(this.coin, this.rows, power);
         }
-        void ev;
         break;
       }
+    }
+  }
+
+  private capture(pointerId: number): void {
+    try {
+      this.app.canvas.setPointerCapture(pointerId);
+    } catch {
+      /* 一部環境では失敗しうる。捕捉できなくても動作は続く */
     }
   }
 
@@ -292,32 +259,33 @@ export class GameScene implements Scene {
   render(ctx: Ctx): void {
     drawSky(ctx);
     drawSunAndClouds(ctx, this.time);
+    drawBoardBackground(ctx);
 
-    drawMountain(ctx);
-    drawSideAnimals(ctx, this.time);
-
-    drawEntryChute(ctx);
-    for (const lane of LANES) drawLane(ctx, lane);
-    this.holes.forEach((h, i) => drawHole(ctx, h, this.moles[i]?.up ?? 0));
-    drawGoalBasket(ctx, this.difficulty, this.flagWave);
-
-    for (const lane of LANES) drawLever(ctx, lane, this.levers[lane.index]?.swing ?? 0);
+    drawSideAnimals(ctx, this.rows, this.time);
+    for (const h of this.holes) drawHole(ctx, h);
+    drawEntryChute(ctx, this.rows);
+    for (const row of this.rows) drawPlank(ctx, row);
+    drawWinPocket(ctx, this.pocket, this.flagWave);
+    for (const row of this.rows) drawLever(ctx, row, this.levers[row.index]?.swing ?? 0);
 
     drawBoardFrame(ctx);
     drawCabinet(ctx);
 
     this.renderCoin(ctx);
-
     drawCoinSlot(ctx);
-    const tubeT = this.insertTubeT();
-    if (tubeT !== null) drawInsertCoin(ctx, tubeT);
+    if (this.phase === 'insert') {
+      drawInsertCoin(ctx, this.rows, clamp01(this.phaseTime / INSERT_ANIM));
+    }
 
-    drawPlunger(ctx, this.plunger.knobY, this.plunger.grabbed ? this.plunger.pull : this.plunger.visualPull);
-
+    drawPlunger(
+      ctx,
+      this.plunger.knobY,
+      this.plunger.grabbed ? this.plunger.pull : this.plunger.visualPull,
+    );
     drawGiveUpButton(ctx, this.giveUpRingProgress());
 
     if (this.shouldShowGuide()) {
-      const phase = ((this.time * (1 / 1.2)) % 1 + 1) % 1;
+      const phase = (((this.time / 1.2) % 1) + 1) % 1;
       drawHandGuide(ctx, this.plunger.knobY, phase);
     }
 
@@ -325,37 +293,34 @@ export class GameScene implements Scene {
   }
 
   private renderCoin(ctx: Ctx): void {
-    if (this.phase === 'insert') return; // 投入中はチューブ側で描く
-
+    if (this.phase === 'insert') return; // 投入中はシュート側で描く
     const c = this.coin;
+
     if (c.state === 'falling') {
+      // 穴に吸い込まれて消える
       const t = clamp01(c.timer / FALL_ANIM);
-      const target = c.holeCenter ?? c.pos;
-      const pos: Vec2 = {
+      const target = c.hole
+        ? { x: (c.hole.left + c.hole.right) / 2, y: c.hole.y + 12 }
+        : c.pos;
+      const pos = {
         x: lerp(c.pos.x, target.x, easeOut(t)),
-        y: lerp(c.pos.y, target.y + 10, easeOut(t)),
+        y: lerp(c.pos.y, target.y, easeOut(t)),
       };
-      const r = COIN_R * (1 - easeOut(t) * 0.85);
       ctx.save();
-      ctx.globalAlpha = 1 - t * 0.5;
-      drawCoin(ctx, pos, Math.max(1, r), 0, c.spin);
+      ctx.globalAlpha = 1 - t * 0.6;
+      drawCoin(ctx, pos, Math.max(1, COIN_R * (1 - easeOut(t) * 0.85)), 0, c.spin);
       ctx.restore();
       return;
     }
 
-    if (c.state === 'goal') {
+    if (c.state === 'win') {
       const t = clamp01(c.timer / 0.5);
-      const bounce = Math.abs(Math.sin(t * Math.PI * 2)) * (1 - t) * 16;
+      const bounce = Math.abs(Math.sin(t * Math.PI * 2)) * (1 - t) * 14;
       drawCoin(ctx, { x: c.pos.x, y: c.pos.y - bounce }, COIN_R, 0, c.spin);
       return;
     }
 
     drawCoin(ctx, c.pos, COIN_R, 0, c.spin);
-  }
-
-  private insertTubeT(): number | null {
-    if (this.phase !== 'insert') return null;
-    return clamp01(this.phaseTime / INSERT_ANIM);
   }
 
   private giveUpRingProgress(): number {
@@ -373,9 +338,9 @@ export class GameScene implements Scene {
       this.phase === 'play' &&
       this.plunger.idleTime >= GUIDE_IDLE_DELAY &&
       this.plunger.cooldown <= 0 &&
-      this.coin.state === 'onLane' &&
-      Math.abs(this.coin.vs) < 5 &&
-      canFlick(this.coin, this.coin.laneIndex)
+      this.coin.state === 'onPlank' &&
+      Math.abs(this.coin.vx) < 5 &&
+      canFlick(this.coin, this.rows)
     );
   }
 
@@ -383,17 +348,22 @@ export class GameScene implements Scene {
     const c = this.coin;
     const lines = [
       `phase=${this.phase} state=${c.state}`,
-      `lane=${c.laneIndex + 1} s=${c.s.toFixed(3)} vs=${c.vs.toFixed(0)}`,
-      `pull=${this.plunger.pull.toFixed(3)} reached=${this.reachedLane}`,
-      `diff=${this.difficulty.id}`,
+      `row=${c.rowIndex + 1} x=${c.x.toFixed(0)} vx=${c.vx.toFixed(0)}`,
+      `pull=${this.plunger.pull.toFixed(3)} depth=${this.depth}`,
+      `diff=${this.difficulty.id} plank=${this.difficulty.plankWidth}`,
     ];
     ctx.save();
     ctx.globalAlpha = 0.85;
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(180, 20, 400, 20 + lines.length * 26);
+    ctx.fillRect(170, 20, 400, 20 + lines.length * 26);
     ctx.restore();
     lines.forEach((l, i) =>
-      text(ctx, l, 192, 44 + i * 26, { size: 20, color: COLORS.ink, align: 'left', weight: '600' }),
+      text(ctx, l, 182, 44 + i * 26, {
+        size: 20,
+        color: COLORS.ink,
+        align: 'left',
+        weight: '600',
+      }),
     );
   }
 }

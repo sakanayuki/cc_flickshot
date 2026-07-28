@@ -1,9 +1,11 @@
 /**
- * 全チューニング定数と共有型。詳細設計書 §12。
+ * 全チューニング定数と共有型。
+ *
+ * このゲームは「上から下へ降りる」。コインは右上から入り、各段の溝(みぞ)から
+ * 横に弾かれて 1 段下の板に着地する。板を外すと穴に落ちてコインは没収される。
  *
  * このファイルは副作用を持たない葉ノードで、すべてのモジュールから参照される。
- * 数値を変更したら必ず `npm run verify` を実行し、詳細設計書 §3.6 の表と
- * 突き合わせること。
+ * 数値を変更したら必ず `npm run verify` と `npm test` を実行すること。
  */
 
 // ---------------------------------------------------------------- 共通型
@@ -20,23 +22,30 @@ export interface Rect {
   h: number;
 }
 
-export type LeverSide = 'left' | 'right';
+/** 溝(コインが止まる端)がどちら側か。コインはその反対向きに弾き出される */
+export type NotchSide = 'left' | 'right';
 
-export interface Lane {
+/** 1 段ぶんの板 */
+export interface Row {
   index: number;
-  /** 高い側の端。コインはここから低い方へ転がる */
-  hi: Vec2;
-  /** 低い側の端 = レバーがある側。壁に接している */
-  lo: Vec2;
-  leverSide: LeverSide;
+  /** 板の左端 x */
+  left: number;
+  /** 板の右端 x */
+  right: number;
+  /** 溝の側。'right' なら右端が低く、コインは右端で止まって左へ弾かれる */
+  notchSide: NotchSide;
+  /** 溝(板の低い側)の y */
+  notchY: number;
+  /** 板の高い側の y。notchY より PLANK_DROP だけ小さい */
+  highY: number;
 }
 
-export interface Hole {
-  laneIndex: number;
-  /** レーン上の位置。0 = 高い端、1 = レバー端 */
-  s: number;
-  radius: number;
-  center: Vec2;
+/** 最下段の下にある「あたりの口」。ここに入ればクリア */
+export interface WinPocket {
+  left: number;
+  right: number;
+  /** 受け口の高さ。コイン中心がこの y に達したら成功 */
+  y: number;
 }
 
 export type DifficultyId = 'easy' | 'normal';
@@ -44,15 +53,11 @@ export type DifficultyId = 'easy' | 'normal';
 export interface DifficultyConfig {
   id: DifficultyId;
   label: string;
-  /** [段1..段5] それぞれの穴の s 座標 */
-  holeS: readonly (readonly number[])[];
-  holeRadius: number;
-  /** これ未満の転がり速度で穴に落ちる (px/s) */
-  fallSpeed: number;
-  /** ゴールのバスケットの左端 x。小さいほどゴールが広い */
-  goalBasketLeft: number;
-  /** レバー端のリップを飛び越える速度。null = 転落なし */
-  lipEscapeSpeed: number | null;
+  /**
+   * 板の幅。これだけが難易度差。
+   * 広いほど着地できる範囲が広く、強すぎ・弱すぎの許容が大きい。
+   */
+  plankWidth: number;
 }
 
 // ---------------------------------------------------------------- 画面
@@ -61,100 +66,93 @@ export const LOGICAL_W = 720;
 export const LOGICAL_H = 1280;
 export const MAX_DPR = 3;
 
-// ---------------------------------------------------------------- 盤面
-
-/**
- * レーンのレバー端 x。コインはここで止まる。
- * 盤面の壁はここから COIN_R だけ外側にあり、止まったコインがちょうど壁に接する。
- */
-export const LANE_END_LEFT = 60;
-export const LANE_END_RIGHT = 660;
-
-export const BOARD_TOP = 40;
-export const BOARD_BOTTOM = 750;
-
-export const LANE_COUNT = 5;
-/** 高い端 → レバー端の水平距離 */
-export const LANE_LEN = 450;
-/** 同区間の落差 */
-export const LANE_DROP = 40;
-/** 段間の垂直距離 */
-export const LANE_GAP = 105;
-/** 高い端が壁から引っ込む量。この隙間がコインの通るシャフトになる */
-export const SHAFT_W = 150;
-/** 段1のレバー端を盤面下端からどれだけ上げるか */
-export const LANE_BASE_OFFSET = 8;
-
-export const LANE_ANGLE = Math.asin(LANE_DROP / LANE_LEN); // 5.10 deg
-/** レーンの実長(斜辺)。s ↔ px の換算に使う */
-export const LANE_SPAN = Math.hypot(LANE_LEN, LANE_DROP);
-
 // ---------------------------------------------------------------- コイン
 
 export const COIN_R = 28;
 
-/** 盤面の壁。レバー端に静止したコインが壁にちょうど接する位置 */
-export const BOARD_LEFT = LANE_END_LEFT - COIN_R;
-export const BOARD_RIGHT = LANE_END_RIGHT + COIN_R;
+// ---------------------------------------------------------------- 盤面
+
+/** 盤面の壁。コインの中心はここから COIN_R 内側までしか行けない */
+export const BOARD_LEFT = 40;
+export const BOARD_RIGHT = 680;
+export const BOARD_TOP = 40;
+/** 盤面の下端。プランジャー帯を画面の 22% に抑えるためここまで広げてある */
+export const BOARD_BOTTOM = 994;
+
+export const ROW_COUNT = 5;
+/** 溝から溝までの垂直距離。全段共通 */
+export const ROW_GAP = 145;
+/** 1 段目の溝の y */
+export const ROW_TOP_Y = 210;
+/** 板の高い側と低い側(溝)の落差。コインが溝まで転がるための傾き */
+export const PLANK_DROP = 22;
+
+/**
+ * 溝から板の手前側の端までの距離(= 弱すぎたときに落ちる穴の幅)。
+ *
+ * 0 にしてはならない。0 だと「弱すぎ」で落ちる余地が無くなり、
+ * 強すぎでしか失敗しない片側だけのゲームになる。
+ */
+export const NEAR_GAP = 120;
+
+/** 盤面の中心 x。溝の位置はここを軸に左右対称に決まる */
+export const BOARD_CENTER_X = (BOARD_LEFT + BOARD_RIGHT) / 2;
+
+/**
+ * 溝の x を板幅から導く。
+ *
+ * 右の溝から左へ弾いたコインが着地する板の左端が、そのまま次の溝になるように
+ * 取ってある。これにより 5 つの遷移がすべて同じ「横に飛ぶ距離」になり、
+ * 弾き力の適正範囲が段によってばらつかない。
+ */
+export function notchOffset(plankWidth: number): number {
+  return (NEAR_GAP + plankWidth) / 2;
+}
 
 // ---------------------------------------------------------------- 物理
 
 export const GRAVITY = 2200; // px/s^2
-/**
- * 転がりの減衰 (1/s)。上げてはならない(詳細設計書 §4.2)。
- * 大きくすると全てのコインが終端速度に収束してしまい、
- * 「速く転がっているコインは穴を飛び越える」というゲーム性が壊れる。
- */
-export const ROLL_DAMPING = 0.35;
-export const WALL_RESTITUTION = 0.5;
+/** 板の上を転がるときの減衰 (1/s) */
+export const ROLL_DAMPING = 1.6;
 export const FIXED_DT = 1 / 60;
 /** タブ復帰時のスパイラル防止 */
 export const MAX_FRAME_TIME = 0.25;
 
 // ---------------------------------------------------------------- 弾き
 
-export const P_MIN = 620; // px/s
-export const P_MAX = 1700; // px/s
+export const P_MIN = 200; // px/s
+export const P_MAX = 1000; // px/s
 /**
- * 鉛直から盤面内側へ。
- *
- * この値を下げてはならない。シャフトの上は「2段上のレーンの裏面」で塞がれており、
- * 角度が浅いとコインが次の段の先端を越える前に天井にぶつかって戻されるため、
- * 20 度では成功域がストロークの 2% しかなくなる。26 度で 73% になる。
- * `npm run verify` の項目8がこれを検証している。
+ * 弾く角度。水平からの仰角。
+ * 少し上向きにすることで放物線が見え、「弾かれた」感じが出る。
  */
-export const FLICK_ANGLE_DEG = 26;
-export const FLICK_ANGLE = (FLICK_ANGLE_DEG * Math.PI) / 180;
-/** 弾きゾーン。狭くしてはならない(詳細設計書 §6.5) */
-export const FLICK_ZONE_S = { min: 0.7, max: 1.0 } as const;
+export const FLICK_RISE_DEG = 12;
+export const FLICK_RISE = (FLICK_RISE_DEG * Math.PI) / 180;
+/** 溝からこの距離以内にいるコインだけが弾かれる。広めに取る */
+export const FLICK_ZONE_PX = 90;
 export const FLICK_COOLDOWN = 0.3; // s
-/** レバーのはたき上げアニメの長さ */
+/** レバーのはたきアニメの長さ */
 export const LEVER_SWING_TIME = 0.2; // s
 
 // ---------------------------------------------------------------- プランジャー
 
-export const KNOB_REST: Vec2 = { x: 560, y: 830 };
-export const KNOB_R = 70;
-/** 指の移動量。削ってはならない(詳細設計書 §6.3) */
-export const STROKE_FINGER = 450;
-/** ノブの見た目の移動量 */
-export const STROKE_KNOB = 380;
+export const KNOB_REST: Vec2 = { x: 560, y: 1040 };
+export const KNOB_R = 46;
+/** 指の移動量。画面下端までちょうど届く */
+export const STROKE_FINGER = 240;
+/** ノブの見た目の移動量。引ききってもノブが画面内に残るよう指より小さい */
+export const STROKE_KNOB = 190;
 export const PULL_DEADZONE = 0.05;
 /** 離してから戻りきるまで (s) */
 export const KNOB_RETURN = 0.15;
-export const GRAB_ZONE: Rect = { x: 390, y: 755, w: 330, h: 230 };
-
-// ---------------------------------------------------------------- ゴール
-
-export const GOAL_LIP_X = 510;
-export const GOAL_LIP_TOP = 177;
-export const GOAL_FLOOR_Y = 235;
+/** 掴み領域。ノブより大幅に広く取り、3歳児が掴み損ねないようにする */
+export const GRAB_ZONE: Rect = { x: 300, y: 996, w: 420, h: 284 };
 
 // ---------------------------------------------------------------- UI
 
-export const GIVEUP_CENTER: Vec2 = { x: 128, y: 132 };
-export const GIVEUP_R = 44;
-export const GIVEUP_CANCEL_R = 88;
+export const GIVEUP_CENTER: Vec2 = { x: 108, y: 108 };
+export const GIVEUP_R = 42;
+export const GIVEUP_CANCEL_R = 84;
 export const GIVEUP_HOLD = 1.0; // s
 export const GIVEUP_RING_DELAY = 0.2; // s
 export const GUIDE_IDLE_DELAY = 2.0; // s
@@ -164,71 +162,21 @@ export const BUTTON_PADDING = 20;
 
 // ---------------------------------------------------------------- 演出
 
-export const INSERT_ANIM = 1.5; // s
+export const INSERT_ANIM = 1.4; // s
 export const FALL_ANIM = 1.0; // s
-export const GOAL_ANIM = 1.5; // s
+export const WIN_ANIM = 1.5; // s
 export const STAMP_ANIM = 0.6; // s
 
-/**
- * 投入されたコインがシュートを滑り降りて段1に乗るときの初速 (px/s)。
- *
- * 0 にしてはならない。静止から転がり始めると段1の穴に達する時点で 272 px/s
- * にしかならず、ふつうの落下閾値を下回って「一度も弾く前に落ちる」ようになる。
- * `npm run verify` の項目8がこれを検証している。
- */
-export const INSERT_ENTRY_SPEED = 220;
-
-export const COIN_SLOT_CENTER: Vec2 = { x: 185, y: 900 };
-export const COIN_SLOT_SIZE = { w: 130, h: 90 } as const;
+/** コイン投入口。盤面の右上 */
+export const COIN_SLOT_CENTER: Vec2 = { x: 618, y: 96 };
+export const COIN_SLOT_SIZE = { w: 118, h: 84 } as const;
 
 // ---------------------------------------------------------------- 難易度
 
 export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
-  easy: {
-    id: 'easy',
-    label: 'やさしい',
-    holeS: [[0.85], [0.85], [0.85], [0.85], [0.85]],
-    holeRadius: 25,
-    fallSpeed: 230,
-    goalBasketLeft: 260,
-    lipEscapeSpeed: null,
-  },
-  normal: {
-    id: 'normal',
-    label: 'ふつう',
-    holeS: [[0.85], [0.85], [0.65, 0.87], [0.65, 0.87], [0.65, 0.87]],
-    holeRadius: 34,
-    fallSpeed: 280,
-    goalBasketLeft: 300,
-    lipEscapeSpeed: 650,
-  },
+  easy: { id: 'easy', label: 'やさしい', plankWidth: 330 },
+  normal: { id: 'normal', label: 'ふつう', plankWidth: 160 },
 };
-
-// ---------------------------------------------------------------- レーン座標
-
-/**
- * レーンは定数から導出する(手打ちしない)。
- * 段1(index 0)のレバーが右、以降左右交互。
- * 詳細設計書 §3.2 の表と一致することを `npm run verify` が検証する。
- */
-export const LANES: readonly Lane[] = Array.from({ length: LANE_COUNT }, (_, i): Lane => {
-  const leverRight = i % 2 === 0;
-  const loY = BOARD_BOTTOM - LANE_BASE_OFFSET - i * LANE_GAP;
-  const hiY = loY - LANE_DROP;
-  return leverRight
-    ? {
-        index: i,
-        hi: { x: LANE_END_LEFT + SHAFT_W, y: hiY },
-        lo: { x: LANE_END_RIGHT, y: loY },
-        leverSide: 'right',
-      }
-    : {
-        index: i,
-        hi: { x: LANE_END_RIGHT - SHAFT_W, y: hiY },
-        lo: { x: LANE_END_LEFT, y: loY },
-        leverSide: 'left',
-      };
-});
 
 // ---------------------------------------------------------------- 色
 
@@ -240,16 +188,16 @@ export const COLORS = {
   mountain: '#8CC63F',
   mountainHi: '#B5E061',
   mountainSh: '#5FA32A',
-  laneTop: '#D9A05B',
-  laneSide: '#A9713A',
-  laneEdge: '#6B4423',
+  plankTop: '#D9A05B',
+  plankSide: '#A9713A',
+  plankEdge: '#6B4423',
   lever: '#E8503A',
   leverDark: '#B23324',
-  hole: '#4A3520',
-  holeRim: '#2E1F12',
+  hole: '#3A2A18',
+  holeRim: '#241708',
   coinRim: '#F5C242',
   coinFace: '#FFF3D0',
-  goalPocket: '#F2E9D8',
+  pocket: '#F2E9D8',
   flagRed: '#E8503A',
   ink: '#3B2A1A',
   panel: '#FFF8EC',
