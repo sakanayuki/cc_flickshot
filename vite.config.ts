@@ -6,6 +6,10 @@ export default defineConfig({
   build: {
     target: 'es2020',
     outDir: 'dist',
+    // 単一バンドルで動的 import がないため不要。
+    // 入れておくと fetch() を含むポリフィルが混ざり、
+    // 「初回ロード以外ネットワーク不要」という要件が読み取りにくくなる
+    modulePreload: false,
   },
   test: {
     globals: true,
