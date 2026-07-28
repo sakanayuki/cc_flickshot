@@ -11,6 +11,7 @@ import {
   FLICK_ANGLE,
   FLICK_ZONE_S,
   GRAVITY,
+  INSERT_ENTRY_SPEED,
   LANES,
   LANE_ANGLE,
   LANE_SPAN,
@@ -96,7 +97,8 @@ export function placeOnLaneStart(coin: Coin): void {
   coin.state = 'onLane';
   coin.laneIndex = 0;
   coin.s = 0;
-  coin.vs = 0;
+  // シュートを滑り降りてきた勢いを引き継ぐ。詳細設計書 §8.4
+  coin.vs = INSERT_ENTRY_SPEED;
   coin.timer = 0;
   coin.holeCenter = null;
   coin.spin = 0;

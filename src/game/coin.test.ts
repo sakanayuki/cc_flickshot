@@ -120,11 +120,14 @@ describe('穴の判定 (§13.2)', () => {
   });
 
   it('穴の中心・速い → 落ちない', () => {
-    expect(checkHole(coinAt(lane0Hole.s, 300), holes, EASY.fallSpeed)).toBeNull();
+    expect(checkHole(coinAt(lane0Hole.s, EASY.fallSpeed + 20), holes, EASY.fallSpeed)).toBeNull();
   });
 
-  it('同じ速度でも ふつう なら落ちる', () => {
-    expect(checkHole(coinAt(lane0Hole.s, 300), holes, NORMAL.fallSpeed)).not.toBeNull();
+  // 難易度差はこの閾値だけで作っている。同じ速度でも ふつう なら落ちる
+  it('やさしいなら通過する速度でも、ふつうなら落ちる', () => {
+    const between = (EASY.fallSpeed + NORMAL.fallSpeed) / 2;
+    expect(checkHole(coinAt(lane0Hole.s, between), holes, EASY.fallSpeed)).toBeNull();
+    expect(checkHole(coinAt(lane0Hole.s, between), holes, NORMAL.fallSpeed)).not.toBeNull();
   });
 
   it('穴の外 → 落ちない', () => {
@@ -356,5 +359,103 @@ describe('レーン上の転がり (§4.2)', () => {
       ((coin.pos.x - lane.hi.x) * dy - (coin.pos.y - lane.hi.y) * dx) / len,
     );
     expect(dist).toBeCloseTo(COIN_R, 5);
+  });
+});
+
+// ---------------------------------------------------------------- 実プレイの安全性
+
+/**
+ * 「盤面の数字は正しいのに遊べない」不具合を防ぐためのテスト。
+ *
+ * 実際にこの3つの不具合を作り込んでしまったので、そのまま回帰テストにしてある:
+ *  - ふつうで、一度も弾く前にコインが段1の穴へ落ちる
+ *  - ふつうで、ほどほどの強さで弾くたびに毎回1段下へ転落する
+ *  - 弾きに成功したコインが穴に落ちる
+ */
+describe('実プレイの安全性', () => {
+  /** 与えたシナリオで、穴の位置を通過するときの最も遅い速度 */
+  function slowestAtHoles(setup: (c: Coin) => void, d: DifficultyConfig): number {
+    const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []], lipEscapeSpeed: null };
+    const c = createCoin();
+    setup(c);
+    let slowest = Infinity;
+    const holeS = d.holeS.flat();
+    for (let i = 0; i < 900; i++) {
+      stepCoin(c, FIXED_DT, flat, []);
+      if (c.state !== 'onLane') continue;
+      for (const hs of holeS) {
+        if (Math.abs(c.s - hs) < 0.02) slowest = Math.min(slowest, Math.abs(c.vs));
+      }
+    }
+    return slowest;
+  }
+
+  function fellALevel(power: number, d: DifficultyConfig): boolean {
+    const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []] };
+    const c = createCoin();
+    placeOnLane(c, 1, 1);
+    flickCoin(c, power);
+    for (let i = 0; i < 900; i++) {
+      if (stepCoin(c, FIXED_DT, flat, []).fellToLane !== null) return true;
+    }
+    return false;
+  }
+
+  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
+    '$label: 投入直後、一度も弾く前に穴へ落ちない',
+    (d) => {
+      const holes = buildHoles(d);
+      const c = createCoin();
+      placeOnLaneStart(c);
+      for (let i = 0; i < 900; i++) {
+        expect(stepCoin(c, FIXED_DT, d, holes).hitHole).toBeNull();
+      }
+    },
+  );
+
+  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
+    '$label: 投入直後の転がりは落下閾値に 1 割以上の余裕がある',
+    (d) => {
+      expect(slowestAtHoles((c) => placeOnLaneStart(c), d)).toBeGreaterThan(d.fallSpeed * 1.1);
+    },
+  );
+
+  it.each([DIFFICULTIES.easy, DIFFICULTIES.normal])(
+    '$label: 弾きに成功したコインは穴を通過する',
+    (d) => {
+      const speed = slowestAtHoles((c) => {
+        placeOnLane(c, 0, 1);
+        flickCoin(c, 1100);
+      }, d);
+      expect(speed).toBeGreaterThan(d.fallSpeed);
+    },
+  );
+
+  it('ふつう: 弱い弾きで戻ったコインは穴に落ちる(ここが難易度差)', () => {
+    const speed = slowestAtHoles((c) => {
+      placeOnLane(c, 0, 1);
+      flickCoin(c, 800);
+    }, NORMAL);
+    expect(speed).toBeLessThan(NORMAL.fallSpeed);
+  });
+
+  it('やさしい: 弱い弾きで戻っても穴を通過する', () => {
+    const speed = slowestAtHoles((c) => {
+      placeOnLane(c, 0, 1);
+      flickCoin(c, 800);
+    }, EASY);
+    expect(speed).toBeGreaterThan(EASY.fallSpeed);
+  });
+
+  it('ふつう: ほどほどの弾きでは転落しない', () => {
+    expect(fellALevel(1200, NORMAL)).toBe(false);
+  });
+
+  it('ふつう: 引きすぎると転落する', () => {
+    expect(fellALevel(P_MAX, NORMAL)).toBe(true);
+  });
+
+  it('やさしい: 最大パワーでも転落しない', () => {
+    expect(fellALevel(P_MAX, EASY)).toBe(false);
   });
 });

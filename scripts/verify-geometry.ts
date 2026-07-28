@@ -11,7 +11,6 @@
  */
 
 import {
-  BOARD_RIGHT,
   COIN_R,
   DIFFICULTIES,
   FLICK_ANGLE,
@@ -35,11 +34,18 @@ import {
   STROKE_FINGER,
   STROKE_KNOB,
   BOARD_BOTTOM,
-  BOARD_LEFT,
+  LANE_END_LEFT,
+  LANE_END_RIGHT,
   type DifficultyConfig,
 } from '../src/config.ts';
 import { normalAt } from '../src/game/board.ts';
-import { createCoin, flickCoin, placeOnLane, stepCoin } from '../src/game/coin.ts';
+import {
+  createCoin,
+  flickCoin,
+  placeOnLane,
+  placeOnLaneStart,
+  stepCoin,
+} from '../src/game/coin.ts';
 
 const SIN = Math.sin(FLICK_ANGLE);
 const COS = Math.cos(FLICK_ANGLE);
@@ -115,7 +121,7 @@ LANES.forEach((ln, i) => {
   );
 });
 check('§12 の導出式が §3.2 の表と一致', coordsOk);
-check('レーン長 == LANE_LEN', BOARD_RIGHT - (BOARD_LEFT + SHAFT_W) === LANE_LEN);
+check('レーン長 == LANE_LEN', LANE_END_RIGHT - (LANE_END_LEFT + SHAFT_W) === LANE_LEN);
 console.log(`  傾き = ${((LANE_ANGLE * 180) / Math.PI).toFixed(2)} 度`);
 
 // ---------------------------------------------------------------- 2
@@ -250,8 +256,77 @@ for (const d of Object.values(DIFFICULTIES)) {
   check('ふつうはゴールを外すことがある', n.frac < 0.9, `${(n.frac * 100).toFixed(0)}%`);
 }
 
+// ---------------------------------------------------------------- 4.5
+/**
+ * 実プレイで必ず起きる場面を、そのまま物理で再現して確かめる。
+ * ここは「盤面の数字」ではなく「遊べるかどうか」を守る検算。
+ */
+console.log('\n=== 5. 実プレイの安全性(設計書 §5.1 / §7.2)===');
+
+function rollSpeedAtHoles(
+  setup: (c: ReturnType<typeof createCoin>) => void,
+  d: DifficultyConfig,
+): number {
+  const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []], lipEscapeSpeed: null };
+  const c = createCoin();
+  setup(c);
+  let slowest = Infinity;
+  const holeS = d.holeS.flat();
+  for (let i = 0; i < 900; i++) {
+    stepCoin(c, FIXED_DT, flat, []);
+    if (c.state !== 'onLane') continue;
+    for (const hs of holeS) {
+      if (Math.abs(c.s - hs) < 0.02) slowest = Math.min(slowest, Math.abs(c.vs));
+    }
+  }
+  return slowest;
+}
+
+function fellALevel(power: number, d: DifficultyConfig): boolean {
+  const flat: DifficultyConfig = { ...d, holeS: [[], [], [], [], []] };
+  const c = createCoin();
+  placeOnLane(c, 1, 1);
+  flickCoin(c, power);
+  for (let i = 0; i < 900; i++) {
+    if (stepCoin(c, FIXED_DT, flat, []).fellToLane !== null) return true;
+  }
+  return false;
+}
+
+for (const d of Object.values(DIFFICULTIES)) {
+  const onInsert = rollSpeedAtHoles((c) => placeOnLaneStart(c), d);
+  const weakReturn = rollSpeedAtHoles((c) => {
+    placeOnLane(c, 0, 1);
+    flickCoin(c, 800);
+  }, d);
+  const afterFlick = rollSpeedAtHoles((c) => {
+    placeOnLane(c, 0, 1);
+    flickCoin(c, 1100);
+  }, d);
+  console.log(
+    `  ${d.label}: 落下閾値=${d.fallSpeed}  投入直後=${onInsert.toFixed(0)}  ` +
+      `弱い戻り=${weakReturn.toFixed(0)}  弾き成功後=${afterFlick.toFixed(0)} px/s`,
+  );
+  // 一度も弾く前に落ちるのは論外
+  // 余裕を持たせる。ぎりぎりだと少しの調整で「弾く前に落ちる」に戻ってしまう
+  check(
+    `${d.label}: 投入直後に穴へ落ちない(1割以上の余裕)`,
+    onInsert > d.fallSpeed * 1.1,
+    `${onInsert.toFixed(0)} > ${(d.fallSpeed * 1.1).toFixed(0)}`,
+  );
+  check(`${d.label}: 弾きに成功したコインは穴を通過する`, afterFlick > d.fallSpeed);
+  if (d.id === 'normal') {
+    check('ふつう: 弱い弾きで戻ったコインは穴に落ちる', weakReturn < d.fallSpeed);
+    check('ふつう: ほどほどの弾きでは転落しない', !fellALevel(1200, d));
+    check('ふつう: 引きすぎると転落する', fellALevel(P_MAX, d));
+  } else {
+    check('やさしい: 弱い弾きで戻っても穴を通過する', weakReturn > d.fallSpeed);
+    check('やさしい: 最大パワーでも転落しない', !fellALevel(P_MAX, d));
+  }
+}
+
 // ---------------------------------------------------------------- 5
-console.log('\n=== 5. 転がり速度と落下閾値(設計書 §4.2 / §7.2)===');
+console.log('\n=== 6. 転がり速度の目安(参考)===');
 const weakReturn = rollSpeed(0, 225);
 const fullRoll = rollSpeed(0, LANE_SPAN);
 const afterLand = rollSpeed(480, 250);
@@ -261,22 +336,19 @@ console.log(
 console.log(`  弱い弾きで戻ったコイン(225px) = ${weakReturn.toFixed(0)} px/s`);
 console.log(`  静止から全長(${LANE_SPAN.toFixed(0)}px)     = ${fullRoll.toFixed(0)} px/s`);
 console.log(`  成功した弾きの着地後(250px)   = ${afterLand.toFixed(0)} px/s`);
-check('やさしい: 弱い戻りは穴を通過する', weakReturn > DIFFICULTIES.easy.fallSpeed);
-check('ふつう:   弱い戻りは穴に落ちる', weakReturn < DIFFICULTIES.normal.fallSpeed);
 check(
   '両難易度: 成功した弾きは穴を通過する',
   afterLand > Math.max(DIFFICULTIES.easy.fallSpeed, DIFFICULTIES.normal.fallSpeed),
 );
-check('ふつう: 通常の転がりでは転落しない', fullRoll < DIFFICULTIES.normal.lipEscapeSpeed!);
 
 // ---------------------------------------------------------------- 6
-console.log('\n=== 6. 弾きゾーンとシャフト(設計書 §6.5)===');
-const xZone = BOARD_RIGHT - (1 - FLICK_ZONE_S.min) * LANE_LEN;
-console.log(`  s=${FLICK_ZONE_S.min} -> x=${xZone.toFixed(0)}  (シャフトは x >= ${BOARD_RIGHT - SHAFT_W})`);
-check('弾きゾーンがシャフトの内側に収まっている', xZone >= BOARD_RIGHT - SHAFT_W);
+console.log('\n=== 7. 弾きゾーンとシャフト(設計書 §6.5)===');
+const xZone = LANE_END_RIGHT - (1 - FLICK_ZONE_S.min) * LANE_LEN;
+console.log(`  s=${FLICK_ZONE_S.min} -> x=${xZone.toFixed(0)}  (シャフトは x >= ${LANE_END_RIGHT - SHAFT_W})`);
+check('弾きゾーンがシャフトの内側に収まっている', xZone >= LANE_END_RIGHT - SHAFT_W);
 
 // ---------------------------------------------------------------- 7
-console.log('\n=== 7. レイアウト(設計書 §2.3 / §6.3)===');
+console.log('\n=== 8. レイアウト(設計書 §2.3 / §6.3)===');
 check('盤面とノブが重ならない', KNOB_REST.y - KNOB_R >= BOARD_BOTTOM, `隙間 ${KNOB_REST.y - KNOB_R - BOARD_BOTTOM}px`);
 check('指のストロークが画面内に収まる', LOGICAL_H - KNOB_REST.y === STROKE_FINGER, `${LOGICAL_H - KNOB_REST.y}px`);
 check(

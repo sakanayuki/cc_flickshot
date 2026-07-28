@@ -63,8 +63,13 @@ export const MAX_DPR = 3;
 
 // ---------------------------------------------------------------- 盤面
 
-export const BOARD_LEFT = 60;
-export const BOARD_RIGHT = 660;
+/**
+ * レーンのレバー端 x。コインはここで止まる。
+ * 盤面の壁はここから COIN_R だけ外側にあり、止まったコインがちょうど壁に接する。
+ */
+export const LANE_END_LEFT = 60;
+export const LANE_END_RIGHT = 660;
+
 export const BOARD_TOP = 40;
 export const BOARD_BOTTOM = 750;
 
@@ -87,6 +92,10 @@ export const LANE_SPAN = Math.hypot(LANE_LEN, LANE_DROP);
 // ---------------------------------------------------------------- コイン
 
 export const COIN_R = 28;
+
+/** 盤面の壁。レバー端に静止したコインが壁にちょうど接する位置 */
+export const BOARD_LEFT = LANE_END_LEFT - COIN_R;
+export const BOARD_RIGHT = LANE_END_RIGHT + COIN_R;
 
 // ---------------------------------------------------------------- 物理
 
@@ -160,6 +169,15 @@ export const FALL_ANIM = 1.0; // s
 export const GOAL_ANIM = 1.5; // s
 export const STAMP_ANIM = 0.6; // s
 
+/**
+ * 投入されたコインがシュートを滑り降りて段1に乗るときの初速 (px/s)。
+ *
+ * 0 にしてはならない。静止から転がり始めると段1の穴に達する時点で 272 px/s
+ * にしかならず、ふつうの落下閾値を下回って「一度も弾く前に落ちる」ようになる。
+ * `npm run verify` の項目8がこれを検証している。
+ */
+export const INSERT_ENTRY_SPEED = 220;
+
 export const COIN_SLOT_CENTER: Vec2 = { x: 185, y: 900 };
 export const COIN_SLOT_SIZE = { w: 130, h: 90 } as const;
 
@@ -180,9 +198,9 @@ export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
     label: 'ふつう',
     holeS: [[0.85], [0.85], [0.65, 0.87], [0.65, 0.87], [0.65, 0.87]],
     holeRadius: 34,
-    fallSpeed: 320,
+    fallSpeed: 280,
     goalBasketLeft: 300,
-    lipEscapeSpeed: 520,
+    lipEscapeSpeed: 650,
   },
 };
 
@@ -200,14 +218,14 @@ export const LANES: readonly Lane[] = Array.from({ length: LANE_COUNT }, (_, i):
   return leverRight
     ? {
         index: i,
-        hi: { x: BOARD_LEFT + SHAFT_W, y: hiY },
-        lo: { x: BOARD_RIGHT, y: loY },
+        hi: { x: LANE_END_LEFT + SHAFT_W, y: hiY },
+        lo: { x: LANE_END_RIGHT, y: loY },
         leverSide: 'right',
       }
     : {
         index: i,
-        hi: { x: BOARD_RIGHT - SHAFT_W, y: hiY },
-        lo: { x: BOARD_LEFT, y: loY },
+        hi: { x: LANE_END_RIGHT - SHAFT_W, y: hiY },
+        lo: { x: LANE_END_LEFT, y: loY },
         leverSide: 'left',
       };
 });
