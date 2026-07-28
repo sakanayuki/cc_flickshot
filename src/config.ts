@@ -100,15 +100,21 @@ export const ROW_GAP = 145;
 export const ROW_TOP_Y = 210;
 
 /**
- * 中央の隙間(=「手前の穴」)の幅。すべての段の溝はこの隙間を挟んで
+ * 中央の隙間(=「間の穴」)の幅。すべての段の溝はこの隙間を挟んで
  * 向かい合う 2 本の柱状に並ぶ:
  *   偶数段(1,3,5 段目)の溝 x = BOARD_CENTER_X + GROOVE_GAP/2(板は右へ伸びる)
  *   奇数段(2,4 段目)  の溝 x = BOARD_CENTER_X - GROOVE_GAP/2(板は左へ伸びる)
  *
  * 0 にしてはならない。0 だと「弱すぎ」で落ちる余地が無くなり、
  * 強すぎでしか失敗しない片側だけのゲームになる。
+ *
+ * **この値が「弾く点(溝)が壁からどれだけ離れるか」を決める。**
+ *   溝から壁までの距離 = 板の幅 + 奥の穴の幅 = (640 - GROOVE_GAP) / 2
+ * 実機は弾く点が左右の端寄りにあるので、隙間を広く・板を細く取って
+ * 溝を壁へ寄せている。ただし板が壁に届くと「強すぎ」で落ちる先(奥の穴)が
+ * 消えるため、奥の穴に最低 COIN_R*2 を残せるところが限界(検算 §1)。
  */
-export const GROOVE_GAP = 120;
+export const GROOVE_GAP = 260;
 export const GROOVE_EVEN_X = BOARD_CENTER_X + GROOVE_GAP / 2;
 export const GROOVE_ODD_X = BOARD_CENTER_X - GROOVE_GAP / 2;
 
@@ -141,8 +147,8 @@ export const MAX_SUBSTEP_MOVE = 6;
 
 // ---------------------------------------------------------------- 弾き
 
-export const P_MIN = 250; // px/s
-export const P_MAX = 800; // px/s
+export const P_MIN = 530; // px/s
+export const P_MAX = 840; // px/s
 /**
  * 弾く角度。水平からの仰角。
  * レバーがコインを下からはたき上げるイメージで、放物線がはっきり見える。
@@ -199,8 +205,8 @@ export const COIN_SLOT_SIZE = { w: 118, h: 84 } as const;
 // ---------------------------------------------------------------- 難易度
 
 export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
-  easy: { id: 'easy', label: 'やさしい', plankWidth: 190 },
-  normal: { id: 'normal', label: 'ふつう', plankWidth: 110 },
+  easy: { id: 'easy', label: 'やさしい', plankWidth: 120 },
+  normal: { id: 'normal', label: 'ふつう', plankWidth: 80 },
 };
 
 // ---------------------------------------------------------------- 色

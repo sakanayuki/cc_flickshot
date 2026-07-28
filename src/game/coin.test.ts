@@ -88,6 +88,9 @@ function scanBand(d: DifficultyConfig, rowIndex: number) {
 
 const ROWS = [0, 1, 2, 3, 4];
 
+/** ストローク中央の弾き力。定数を動かしても常に成功域の内側に入る */
+const midPower = () => P_MIN + (P_MAX - P_MIN) * 0.45;
+
 // ---------------------------------------------------------------- 盤面
 
 describe('盤面の幾何', () => {
@@ -148,11 +151,20 @@ describe('盤面の幾何', () => {
     }
   });
 
-  it.each([EASY, NORMAL])('$label: 丸穴の見た目が落下範囲に収まる', (d) => {
+  it.each([EASY, NORMAL])('$label: 穴の見た目が落下範囲に収まる', (d) => {
     for (const h of buildHoles(d)) {
-      expect(h.cx - h.r).toBeGreaterThanOrEqual(h.left - 1);
-      expect(h.cx + h.r).toBeLessThanOrEqual(h.right + 1);
-      expect(h.r).toBeGreaterThan(0);
+      expect(h.cx - h.rx).toBeGreaterThanOrEqual(h.left - 1);
+      expect(h.cx + h.rx).toBeLessThanOrEqual(h.right + 1);
+      expect(h.rx).toBeGreaterThan(0);
+      expect(h.ry).toBeGreaterThan(0);
+    }
+  });
+
+  // 棒と棒の間はまるごと開口している。見た目より広い範囲で落ちると
+  // 「板の上に乗ったのに落ちた」ように見えてしまう
+  it.each([EASY, NORMAL])('$label: 間の穴は隙間をほぼ埋めている', (d) => {
+    for (const h of buildHoles(d).filter((x) => x.kind === 'near')) {
+      expect(h.rx * 2).toBeGreaterThan((h.right - h.left) * 0.85);
     }
   });
 
@@ -228,7 +240,7 @@ describe('板の上の転がり', () => {
     const holes = buildHoles(EASY);
     const c = createCoin();
     placeOnRow(c, rows, 0, groovePos(rows[0]!).x);
-    flickCoin(c, rows, 500);
+    flickCoin(c, rows, midPower());
     let landed = false;
     for (let i = 0; i < 900 && !landed; i++) {
       landed = stepCoin(c, FIXED_DT, rows, pocket, holes).landedOnRow !== null;

@@ -215,8 +215,11 @@ function collidePlankEnd(coin: Coin, row: Row, endX: number, outward: number): b
   const top = surface - (isHighEnd ? PLANK_LIP : 0);
   const bottom = surface + PLANK_THICK;
 
-  // コイン中心が板面より十分上にあるなら端面には当たらない(上面判定に任せる)
-  if (p.y < top - COIN_R * 0.35) return false;
+  // コインの下端が板面より上にあるなら、まだ触れていない。
+  // ここを緩めて「上面判定に任せる」ことはできない。上面判定は板の範囲内
+  // (onPlank)でしか働かないので、範囲外から角に食い込むコインが
+  // どちらの判定にも拾われず、そのまま板にめり込む。
+  if (p.y + COIN_R < top) return false;
 
   const nearY = Math.max(top, Math.min(bottom, p.y));
   const dx = p.x - endX;

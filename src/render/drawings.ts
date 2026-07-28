@@ -236,6 +236,38 @@ export function drawBoardFace(ctx: Ctx, rows: readonly Row[], pocket: WinPocket)
   }
   ctx.globalAlpha = 1;
 
+  // 印刷された草木。棒の高い端の外側(コインが通らない側)にだけ置いて、
+  // 実機のような賑やかさを出しつつ、落下地点の見通しは損なわない
+  rows.forEach((row, i) => {
+    const toRight = row.grooveSide === 'left';
+    const bx = toRight ? row.right + 36 : row.left - 36;
+    const by = row.grooveY - 46;
+    ctx.globalAlpha = 0.32;
+    for (let k = 0; k < 3; k++) {
+      const gx = bx + (k - 1) * 13;
+      const gh = 20 + ((i + k) % 3) * 9;
+      ctx.beginPath();
+      ctx.moveTo(gx, by + 16);
+      ctx.quadraticCurveTo(gx + (k - 1) * 7, by + 16 - gh * 0.7, gx + (k - 1) * 11, by + 16 - gh);
+      ctx.strokeStyle = '#6FAE3F';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    // 小さな花
+    if (i % 2 === 0) {
+      ctx.globalAlpha = 0.4;
+      for (let p = 0; p < 5; p++) {
+        const a = (p / 5) * Math.PI * 2;
+        circle(ctx, bx + 16 + Math.cos(a) * 6, by - 2 + Math.sin(a) * 6, 4.5);
+        paint(ctx, '#FF9BB5', null, 0);
+      }
+      circle(ctx, bx + 16, by - 2, 3.5);
+      paint(ctx, COLORS.sun, null, 0);
+    }
+    ctx.globalAlpha = 1;
+  });
+
   // コース案内の矢印。溝から 1 段下の板へ、弾く向きに 3 つ並べる
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
@@ -267,30 +299,29 @@ export function drawBoardFace(ctx: Ctx, rows: readonly Row[], pocket: WinPocket)
  * 楕円(少し上から見た遠近)で描く。
  */
 export function drawRoundHole(ctx: Ctx, hole: Hole): void {
-  const { cx, cy, r } = hole;
-  const ry = r * 0.62;
+  const { cx, cy, rx, ry } = hole;
 
   // 影(穴の下に落ちる淡い影)
-  ellipse(ctx, cx, cy + 6, r + 12, ry + 8);
+  ellipse(ctx, cx, cy + 6, rx + 12, ry + 8);
   paint(ctx, 'rgba(0,0,0,0.10)', null, 0);
 
   // オレンジのリム
-  ellipse(ctx, cx, cy, r + 10, ry + 7);
+  ellipse(ctx, cx, cy, rx + 10, ry + 7);
   paint(ctx, COLORS.holeRing, COLORS.ink, LINE_W);
   // リムの立体感(下半分を暗く)
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx, cy, r + 7, ry + 4.5, 0, Math.PI * 0.08, Math.PI * 0.92);
+  ctx.ellipse(cx, cy, rx + 7, ry + 4.5, 0, Math.PI * 0.08, Math.PI * 0.92);
   ctx.strokeStyle = COLORS.holeRingDark;
   ctx.lineWidth = 5;
   ctx.stroke();
   ctx.restore();
 
   // 穴の中(奥へ行くほど暗い)
-  const g = ctx.createRadialGradient(cx, cy + ry * 0.35, r * 0.1, cx, cy, r);
+  const g = ctx.createRadialGradient(cx, cy + ry * 0.35, ry * 0.15, cx, cy, Math.max(rx, ry));
   g.addColorStop(0, COLORS.holePit);
   g.addColorStop(1, COLORS.hole);
-  ellipse(ctx, cx, cy, r, ry);
+  ellipse(ctx, cx, cy, rx, ry);
   ctx.fillStyle = g;
   ctx.fill();
   ctx.strokeStyle = COLORS.ink;
@@ -300,7 +331,7 @@ export function drawRoundHole(ctx: Ctx, hole: Hole): void {
   // 奥の壁(上側の内壁が少し見える)
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx, cy - 1.5, r * 0.86, ry * 0.8, 0, Math.PI, Math.PI * 2);
+  ctx.ellipse(cx, cy - 1.5, rx * 0.9, ry * 0.8, 0, Math.PI, Math.PI * 2);
   ctx.strokeStyle = 'rgba(90,60,30,0.55)';
   ctx.lineWidth = 4;
   ctx.stroke();
@@ -312,13 +343,12 @@ export function drawRoundHole(ctx: Ctx, hole: Hole): void {
  * コインが「穴の中へ入っていく」ように見せる。
  */
 export function drawRoundHoleFront(ctx: Ctx, hole: Hole): void {
-  const { cx, cy, r } = hole;
-  const ry = r * 0.62;
+  const { cx, cy, rx, ry } = hole;
   ctx.save();
   // 手前半分のリング(外楕円の下半分 − 内楕円の下半分)
   ctx.beginPath();
-  ctx.ellipse(cx, cy, r + 10, ry + 7, 0, 0, Math.PI);
-  ctx.ellipse(cx, cy, r, ry, 0, Math.PI, 0, true);
+  ctx.ellipse(cx, cy, rx + 10, ry + 7, 0, 0, Math.PI);
+  ctx.ellipse(cx, cy, rx, ry, 0, Math.PI, 0, true);
   ctx.closePath();
   ctx.fillStyle = COLORS.holeRing;
   ctx.fill();
@@ -327,7 +357,7 @@ export function drawRoundHoleFront(ctx: Ctx, hole: Hole): void {
   ctx.stroke();
   // 手前の内壁
   ctx.beginPath();
-  ctx.ellipse(cx, cy + 1, r * 0.96, ry * 0.9, 0, 0, Math.PI);
+  ctx.ellipse(cx, cy + 1, rx * 0.97, ry * 0.9, 0, 0, Math.PI);
   ctx.strokeStyle = COLORS.hole;
   ctx.lineWidth = 7;
   ctx.stroke();
@@ -458,6 +488,55 @@ export function drawLever(ctx: Ctx, row: Row, lever: LeverState): void {
   // 軸
   circle(ctx, pivot.x, pivot.y, 7);
   paint(ctx, COLORS.leverDark, COLORS.ink, 3);
+}
+
+/**
+ * 筐体の左右の縁に並ぶレバーのノブ。
+ *
+ * 実機では、各段のレバーの軸が筐体の側面を貫いて丸いノブになっている。
+ * 板は溝の反対側の壁へ向かって伸びているので、ノブはその壁側に付く。
+ * 結果として段ごとに左・右・左…と交互に並ぶ(実機の写真と同じ)。
+ */
+export function drawSideKnobs(ctx: Ctx, rows: readonly Row[], levers: readonly LeverState[]): void {
+  rows.forEach((row) => {
+    const lever = levers[row.index];
+    if (!lever) return;
+    // 板が伸びていく側の壁にノブが付く
+    const toRight = row.grooveSide === 'left';
+    const wallX = toRight ? BOARD_RIGHT + 22 : BOARD_LEFT - 22;
+    const y = row.grooveY + PLANK_THICK + 20;
+    const dirIn = toRight ? -1 : 1; // 盤面の内側へ向かう向き
+
+    // 引くとノブが外へ出て、はたくと戻る
+    const out = lever.swing < 0 ? -lever.swing * 9 : (1 - lever.swing) * 2;
+    const kx = wallX - dirIn * out;
+
+    // 軸(盤面の内側へ伸びる)
+    line(ctx, { x: kx, y }, { x: kx + dirIn * 30, y }, '#8E8A82', 8);
+    // 台座
+    roundRect(ctx, kx - 11, y - 15, 22, 30, 7);
+    paint(ctx, COLORS.cabinetTrimDark, COLORS.ink, 3);
+    // ノブ本体
+    circle(ctx, kx, y, 16);
+    paint(ctx, '#E3DDCE', COLORS.ink, LINE_W);
+    circle(ctx, kx, y, 10);
+    paint(ctx, '#A9B2BC', COLORS.ink, 3);
+    circle(ctx, kx - 5, y - 6, 4.5);
+    paint(ctx, 'rgba(255,255,255,0.8)', null, 0);
+  });
+}
+
+/** ノブと弾き部をつなぐロッド。板より先(奥)に描く */
+export function drawLeverRods(ctx: Ctx, rows: readonly Row[]): void {
+  rows.forEach((row) => {
+    const toRight = row.grooveSide === 'left';
+    const wallX = toRight ? BOARD_RIGHT : BOARD_LEFT;
+    const gPos = groovePos(row);
+    const y = row.grooveY + PLANK_THICK + 20;
+    ctx.globalAlpha = 0.55;
+    line(ctx, { x: wallX, y }, { x: gPos.x, y }, '#8E8A82', 6);
+    ctx.globalAlpha = 1;
+  });
 }
 
 // ---------------------------------------------------------------- あたりの口

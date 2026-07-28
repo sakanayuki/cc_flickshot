@@ -63,11 +63,13 @@ import {
   drawHandGuide,
   drawInsertCoin,
   drawLever,
+  drawLeverRods,
   drawPlank,
   drawPlunger,
   drawRoundHole,
   drawRoundHoleFront,
   drawSideAnimals,
+  drawSideKnobs,
   drawWinPocket,
 } from '../render/drawings.ts';
 import { ParticleSystem } from '../render/particles.ts';
@@ -328,6 +330,7 @@ export class GameScene implements Scene {
     for (const h of this.holes) drawRoundHole(ctx, h);
     drawWinPocket(ctx, this.pocket, this.flagWave);
     drawSideAnimals(ctx, this.rows, this.time);
+    drawLeverRods(ctx, this.rows);
     for (const row of this.rows) drawPlank(ctx, row);
     for (const row of this.rows) drawLever(ctx, row, this.levers[row.index]!);
 
@@ -335,6 +338,7 @@ export class GameScene implements Scene {
     this.particles.render(ctx);
 
     drawBoardFrame(ctx);
+    drawSideKnobs(ctx, this.rows, this.levers);
     drawCabinetLower(ctx);
 
     drawCoinSlot(ctx);
@@ -411,7 +415,7 @@ export class GameScene implements Scene {
     const slide = easeOut(clamp01(t / 0.3));
     const sink = clamp01((t - 0.3) / 0.5);
     const x = lerp(c.fallFrom.x, hole.cx, slide);
-    const y = lerp(Math.min(c.fallFrom.y, hole.cy - COIN_R * 0.4), hole.cy + hole.r * 0.55, sink);
+    const y = lerp(Math.min(c.fallFrom.y, hole.cy - COIN_R * 0.4), hole.cy + hole.ry * 0.7, sink);
     const scale = 1 - sink * 0.45;
 
     ctx.save();

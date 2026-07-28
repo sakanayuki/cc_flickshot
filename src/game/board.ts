@@ -126,10 +126,11 @@ export interface Hole {
   y: number;
   /** 溝から見て手前(弱すぎ)側か、奥(強すぎ)側か */
   kind: 'near' | 'far';
-  /** 丸穴の見た目の中心と半径 */
+  /** 穴の見た目の中心と半径。落下範囲いっぱいに開口させるので楕円になる */
   cx: number;
   cy: number;
-  r: number;
+  rx: number;
+  ry: number;
 }
 
 /**
@@ -159,14 +160,22 @@ export function buildHoles(d: DifficultyConfig): Hole[] {
 
     for (const s of [near, far]) {
       if (s.right - s.left <= 1) continue;
-      const r = Math.max(Math.min((s.right - s.left) / 2 - 6, 44), 18);
-      // 間の穴は溝と溝の真ん中。奥の穴は「棒の端のすぐ先」に寄せる(実機と同じ)
+      const half = (s.right - s.left) / 2;
       let cx = (s.left + s.right) / 2;
-      if (s.kind === 'far') {
-        cx = goingLeft
-          ? Math.min(cx, s.right - r - 8)
-          : Math.max(cx, s.left + r + 8);
+      let rx: number;
+      let ry: number;
+
+      if (s.kind === 'near') {
+        // 棒と棒の間はまるごと開口している。落ちる範囲と見た目を一致させる
+        rx = half - 10;
+        ry = 34;
+      } else {
+        // 奥の穴は「棒の端のすぐ先」に寄せた丸穴(実機と同じ)
+        rx = Math.max(Math.min(half - 8, 46), 18);
+        ry = rx * 0.66;
+        cx = goingLeft ? Math.min(cx, s.right - rx - 6) : Math.max(cx, s.left + rx + 6);
       }
+
       holes.push({
         rowIndex: level,
         left: s.left,
@@ -175,7 +184,8 @@ export function buildHoles(d: DifficultyConfig): Hole[] {
         kind: s.kind,
         cx,
         cy: target.y + 4,
-        r,
+        rx,
+        ry,
       });
     }
   }
