@@ -1,6 +1,9 @@
 /**
  * 盤面・コイン・プランジャー・UI の描画。
  * すべてコード描画で、外部画像・音声・フォントを一切使わない。
+ *
+ * 見た目は実機の 10 円ゲーム筐体(赤いキャビネット+化粧板+
+ * オレンジのリムが付いた丸い落とし穴)を絵本調に寄せたもの。
  */
 
 import {
@@ -20,6 +23,8 @@ import {
   LINE_W,
   LOGICAL_H,
   LOGICAL_W,
+  PLANK_LIP,
+  PLANK_THICK,
   ROW_COUNT,
   type AnimalKind,
   type Rect,
@@ -27,10 +32,20 @@ import {
   type Vec2,
   type WinPocket,
 } from '../config.ts';
-import { downhillDirX, notchPos, plankSurfaceY, type Hole } from '../game/board.ts';
+import {
+  downhillDirX,
+  flickDirX,
+  groovePos,
+  highEndX,
+  plankCoinY,
+  plankSurfaceY,
+  type Hole,
+} from '../game/board.ts';
+import type { LeverState } from '../game/levers.ts';
 import { drawAnimalFace, drawCheerAnimal } from './animals.ts';
 import {
   circle,
+  clamp,
   clamp01,
   easeOut,
   ellipse,
@@ -43,9 +58,7 @@ import {
   type Ctx,
 } from './shapes.ts';
 
-const PLANK_THICK = 18;
-
-// ---------------------------------------------------------------- 背景
+// ---------------------------------------------------------------- 空(タイトル用)
 
 export function drawSky(ctx: Ctx): void {
   const g = ctx.createLinearGradient(0, 0, 0, LOGICAL_H);
@@ -77,90 +90,272 @@ export function drawSunAndClouds(ctx: Ctx, t: number): void {
   ctx.globalAlpha = 1;
 }
 
-/** 盤面の背景。上が明るく下へ行くほど深い、降りていく山肌 */
-export function drawBoardBackground(ctx: Ctx): void {
-  ctx.save();
-  roundRect(ctx, BOARD_LEFT, BOARD_TOP, BOARD_RIGHT - BOARD_LEFT, BOARD_BOTTOM - BOARD_TOP, 18);
-  ctx.clip();
+// ---------------------------------------------------------------- 筐体
 
-  const g = ctx.createLinearGradient(0, BOARD_TOP, 0, BOARD_BOTTOM);
-  g.addColorStop(0, '#DCF3FF');
-  g.addColorStop(0.45, '#CFEBD2');
-  g.addColorStop(1, '#A9CE86');
-  ctx.fillStyle = g;
-  ctx.fillRect(BOARD_LEFT, BOARD_TOP, BOARD_RIGHT - BOARD_LEFT, BOARD_BOTTOM - BOARD_TOP);
-
-  // 左右の山肌。降りていく谷に見せる
-  polygon(ctx, [
-    { x: BOARD_LEFT, y: BOARD_TOP },
-    { x: BOARD_LEFT + 150, y: BOARD_TOP },
-    { x: BOARD_LEFT, y: BOARD_BOTTOM },
-  ]);
-  paint(ctx, 'rgba(140,198,63,0.35)', null, 0);
-  polygon(ctx, [
-    { x: BOARD_RIGHT, y: BOARD_TOP },
-    { x: BOARD_RIGHT - 150, y: BOARD_TOP },
-    { x: BOARD_RIGHT, y: BOARD_BOTTOM },
-  ]);
-  paint(ctx, 'rgba(140,198,63,0.35)', null, 0);
-
-  ctx.restore();
+/** ネジ。筐体のあちこちに打って実機らしくする */
+function screw(ctx: Ctx, x: number, y: number, r = 7): void {
+  circle(ctx, x, y, r);
+  paint(ctx, '#E9E2D2', COLORS.ink, 3);
+  line(ctx, { x: x - r * 0.5, y }, { x: x + r * 0.5, y }, COLORS.ink, 2);
 }
 
 /**
- * 盤面より下の筐体。実機の赤いキャビネットを模した面で、
- * ここが指を動かすための操作エリアになる。
+ * 画面全体の赤いキャビネット。盤面の窓より先に描く。
+ * 実機と同じく、赤い胴体+金の縁飾りで構成する。
  */
-export function drawCabinet(ctx: Ctx): void {
+export function drawCabinetBase(ctx: Ctx): void {
+  const g = ctx.createLinearGradient(0, 0, 0, LOGICAL_H);
+  g.addColorStop(0, '#E25640');
+  g.addColorStop(0.5, COLORS.cabinet);
+  g.addColorStop(1, COLORS.cabinetDark);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+  // 左右の金の帯
+  for (const x of [0, LOGICAL_W - 16]) {
+    ctx.fillStyle = COLORS.cabinetTrim;
+    ctx.fillRect(x, 0, 16, LOGICAL_H);
+    ctx.fillStyle = COLORS.cabinetTrimDark;
+    ctx.fillRect(x + (x === 0 ? 12 : 0), 0, 4, LOGICAL_H);
+  }
+}
+
+/** 盤面より下の操作エリア(プランジャー帯)の装飾 */
+export function drawCabinetLower(ctx: Ctx): void {
   const top = BOARD_BOTTOM + 4;
-  ctx.fillStyle = '#D64B3A';
-  ctx.fillRect(0, top, LOGICAL_W, LOGICAL_H - top);
-  ctx.fillStyle = '#C9A227';
-  ctx.fillRect(0, top, 18, LOGICAL_H - top);
-  ctx.fillRect(LOGICAL_W - 18, top, 18, LOGICAL_H - top);
-  ctx.fillStyle = 'rgba(0,0,0,0.16)';
-  ctx.fillRect(0, top, LOGICAL_W, 8);
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(16, top, LOGICAL_W - 32, 10);
 
   // コインの受け皿。ここにあたりのコインが出てくる
-  roundRect(ctx, 60, LOGICAL_H - 108, 210, 74, 14);
-  paint(ctx, '#8E8A82', 'rgba(0,0,0,0.35)', 4);
-  roundRect(ctx, 74, LOGICAL_H - 94, 182, 46, 10);
+  roundRect(ctx, 56, LOGICAL_H - 116, 214, 82, 16);
+  paint(ctx, COLORS.cabinetDark, COLORS.ink, LINE_W);
+  roundRect(ctx, 70, LOGICAL_H - 102, 186, 54, 12);
+  const g = ctx.createLinearGradient(0, LOGICAL_H - 102, 0, LOGICAL_H - 48);
+  g.addColorStop(0, '#4A423A');
+  g.addColorStop(1, '#6B6158');
   paint(ctx, '#5F5C56', null, 0);
-  text(ctx, 'あたり', 165, LOGICAL_H - 122, { size: 24, color: '#FFFFFF', outline: 0 });
+  ctx.fillStyle = g;
+  ctx.fill();
+  text(ctx, 'あたり ⭐', 163, LOGICAL_H - 130, { size: 22, color: '#FFE9B8', outline: 0 });
+
+  screw(ctx, 36, top + 24);
+  screw(ctx, LOGICAL_W - 36, top + 24);
+  screw(ctx, 36, LOGICAL_H - 30);
+  screw(ctx, LOGICAL_W - 36, LOGICAL_H - 30);
 }
 
+/** 盤面の窓枠。中身をすべて描いた後、最後に重ねる */
 export function drawBoardFrame(ctx: Ctx): void {
-  roundRect(ctx, BOARD_LEFT, BOARD_TOP, BOARD_RIGHT - BOARD_LEFT, BOARD_BOTTOM - BOARD_TOP, 18);
-  paint(ctx, null, COLORS.ink, 10);
+  const w = BOARD_RIGHT - BOARD_LEFT;
+  const h = BOARD_BOTTOM - BOARD_TOP;
+  // 外側の太い枠(ガラス窓の押さえ)
+  roundRect(ctx, BOARD_LEFT - 8, BOARD_TOP - 8, w + 16, h + 16, 24);
+  paint(ctx, null, COLORS.cabinetDark, 16);
+  roundRect(ctx, BOARD_LEFT, BOARD_TOP, w, h, 18);
+  paint(ctx, null, COLORS.ink, 8);
+  // 内側の金のライン
+  roundRect(ctx, BOARD_LEFT + 6, BOARD_TOP + 6, w - 12, h - 12, 14);
+  paint(ctx, null, 'rgba(242,179,61,0.85)', 4);
+
+  screw(ctx, BOARD_LEFT - 14, BOARD_TOP - 14);
+  screw(ctx, BOARD_RIGHT + 14, BOARD_TOP - 14);
+  screw(ctx, BOARD_LEFT - 14, BOARD_BOTTOM + 14);
+  screw(ctx, BOARD_RIGHT + 14, BOARD_BOTTOM + 14);
+
+  // ガラスの反射(左上から斜めの淡い帯)
+  ctx.save();
+  roundRect(ctx, BOARD_LEFT, BOARD_TOP, w, h, 18);
+  ctx.clip();
+  ctx.globalAlpha = 0.07;
+  ctx.fillStyle = '#FFFFFF';
+  polygon(ctx, [
+    { x: BOARD_LEFT + 30, y: BOARD_TOP },
+    { x: BOARD_LEFT + 170, y: BOARD_TOP },
+    { x: BOARD_LEFT + 60, y: BOARD_BOTTOM },
+    { x: BOARD_LEFT - 50, y: BOARD_BOTTOM },
+  ]);
+  ctx.fill();
+  ctx.restore();
 }
 
-// ---------------------------------------------------------------- 段(板と穴)
+// ---------------------------------------------------------------- 盤面の化粧板
 
-/** 板の左右にある穴。落ちたら没収 */
-export function drawHole(ctx: Ctx, hole: Hole): void {
-  const w = hole.right - hole.left;
-  if (w < 8) return;
-  const cx = (hole.left + hole.right) / 2;
-  ellipse(ctx, cx, hole.y + 2, w / 2 - 2, 15);
-  paint(ctx, COLORS.holeRim, null, 0);
-  ellipse(ctx, cx, hole.y, w / 2 - 4, 12);
-  paint(ctx, COLORS.hole, null, 0);
-  // 下側だけ濃くして、落ち込んでいる形が分かるようにする
+/**
+ * 盤面の背景(化粧板)。クリーム色の板に、絵本調の飾りと
+ * 「どっちへ弾くか」を示す矢印(3歳児向けの唯一のコース案内)を印刷する。
+ */
+export function drawBoardFace(ctx: Ctx, rows: readonly Row[], pocket: WinPocket): void {
+  const w = BOARD_RIGHT - BOARD_LEFT;
+  const h = BOARD_BOTTOM - BOARD_TOP;
+  ctx.save();
+  roundRect(ctx, BOARD_LEFT, BOARD_TOP, w, h, 18);
+  ctx.clip();
+
+  const g = ctx.createLinearGradient(0, BOARD_TOP, 0, BOARD_BOTTOM);
+  g.addColorStop(0, '#FFF8DF');
+  g.addColorStop(0.6, COLORS.boardFace);
+  g.addColorStop(1, COLORS.boardFaceDeep);
+  ctx.fillStyle = g;
+  ctx.fillRect(BOARD_LEFT, BOARD_TOP, w, h);
+
+  // 印刷されたおひさまと雲(淡く)
+  ctx.globalAlpha = 0.4;
+  circle(ctx, BOARD_LEFT + 92, BOARD_TOP + 88, 46);
+  paint(ctx, COLORS.sun, null, 0);
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2;
+    line(
+      ctx,
+      { x: BOARD_LEFT + 92 + Math.cos(a) * 58, y: BOARD_TOP + 88 + Math.sin(a) * 58 },
+      { x: BOARD_LEFT + 92 + Math.cos(a) * 72, y: BOARD_TOP + 88 + Math.sin(a) * 72 },
+      COLORS.sun,
+      6,
+    );
+  }
+  ctx.globalAlpha = 0.35;
+  for (const [cx, cy, s] of [
+    [BOARD_LEFT + 320, BOARD_TOP + 64, 0.9],
+    [BOARD_LEFT + 180, BOARD_TOP + 350, 0.6],
+    [BOARD_RIGHT - 120, BOARD_TOP + 470, 0.7],
+  ] as const) {
+    circle(ctx, cx, cy, 30 * s);
+    paint(ctx, '#FFFFFF', null, 0);
+    circle(ctx, cx + 28 * s, cy + 6 * s, 22 * s);
+    paint(ctx, '#FFFFFF', null, 0);
+    circle(ctx, cx - 26 * s, cy + 8 * s, 19 * s);
+    paint(ctx, '#FFFFFF', null, 0);
+  }
+  ctx.globalAlpha = 1;
+
+  // 草むら(下辺)
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 9; i++) {
+    const bx = BOARD_LEFT + 20 + i * (w / 8);
+    circle(ctx, bx, BOARD_BOTTOM + 16, 34 + (i % 3) * 10);
+    paint(ctx, '#A8D77E', null, 0);
+  }
+  ctx.globalAlpha = 1;
+
+  // コース案内の矢印。溝から 1 段下の板へ、弾く向きに 3 つ並べる
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const gPos = groovePos(row);
+    const dir = flickDirX(row);
+    for (let k = 0; k < 3; k++) {
+      const t = (k + 1) / 4;
+      const x = gPos.x + dir * (24 + t * 74);
+      const y = row.grooveY + 26 + t * 62;
+      const s = 11;
+      ctx.globalAlpha = 0.4 - k * 0.08;
+      polygon(ctx, [
+        { x: x - dir * s * 0.7, y: y - s },
+        { x: x + dir * s * 0.6, y: y },
+        { x: x - dir * s * 0.7, y: y + s },
+      ]);
+      paint(ctx, COLORS.accent, null, 0);
+    }
+    ctx.globalAlpha = 1;
+  }
+  void pocket;
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- 丸穴
+
+/**
+ * 丸い落とし穴。実機と同じ、オレンジのリムが付いたこげ茶の穴。
+ * 楕円(少し上から見た遠近)で描く。
+ */
+export function drawRoundHole(ctx: Ctx, hole: Hole): void {
+  const { cx, cy, r } = hole;
+  const ry = r * 0.62;
+
+  // 影(穴の下に落ちる淡い影)
+  ellipse(ctx, cx, cy + 6, r + 12, ry + 8);
+  paint(ctx, 'rgba(0,0,0,0.10)', null, 0);
+
+  // オレンジのリム
+  ellipse(ctx, cx, cy, r + 10, ry + 7);
+  paint(ctx, COLORS.holeRing, COLORS.ink, LINE_W);
+  // リムの立体感(下半分を暗く)
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx, hole.y, w / 2 - 4, 12, 0, Math.PI, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = 6;
+  ctx.ellipse(cx, cy, r + 7, ry + 4.5, 0, Math.PI * 0.08, Math.PI * 0.92);
+  ctx.strokeStyle = COLORS.holeRingDark;
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.restore();
+
+  // 穴の中(奥へ行くほど暗い)
+  const g = ctx.createRadialGradient(cx, cy + ry * 0.35, r * 0.1, cx, cy, r);
+  g.addColorStop(0, COLORS.holePit);
+  g.addColorStop(1, COLORS.hole);
+  ellipse(ctx, cx, cy, r, ry);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = COLORS.ink;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // 奥の壁(上側の内壁が少し見える)
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy - 1.5, r * 0.86, ry * 0.8, 0, Math.PI, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(90,60,30,0.55)';
+  ctx.lineWidth = 4;
   ctx.stroke();
   ctx.restore();
 }
 
-/** 1 段ぶんの板。溝(コインが止まる端)には縁を立てる */
+/**
+ * 穴の手前側のリム。落ちるコインの上に重ねて描き、
+ * コインが「穴の中へ入っていく」ように見せる。
+ */
+export function drawRoundHoleFront(ctx: Ctx, hole: Hole): void {
+  const { cx, cy, r } = hole;
+  const ry = r * 0.62;
+  ctx.save();
+  // 手前半分のリング(外楕円の下半分 − 内楕円の下半分)
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, r + 10, ry + 7, 0, 0, Math.PI);
+  ctx.ellipse(cx, cy, r, ry, 0, Math.PI, 0, true);
+  ctx.closePath();
+  ctx.fillStyle = COLORS.holeRing;
+  ctx.fill();
+  ctx.strokeStyle = COLORS.ink;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  // 手前の内壁
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 1, r * 0.96, ry * 0.9, 0, 0, Math.PI);
+  ctx.strokeStyle = COLORS.hole;
+  ctx.lineWidth = 7;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- レール(板)
+
+/** 1 段ぶんのレール。溝(先端)へ向かって下る木の板 */
 export function drawPlank(ctx: Ctx, row: Row): void {
   const yL = plankSurfaceY(row, row.left);
   const yR = plankSurfaceY(row, row.right);
+  const gPos = groovePos(row);
+  const hiX = highEndX(row);
+  const hiY = plankSurfaceY(row, hiX);
 
-  // 厚み
+  // 落ちる影
+  ctx.globalAlpha = 0.12;
+  polygon(ctx, [
+    { x: row.left + 6, y: yL + PLANK_THICK + 4 },
+    { x: row.right + 6, y: yR + PLANK_THICK + 4 },
+    { x: row.right + 6, y: yR + PLANK_THICK + 12 },
+    { x: row.left + 6, y: yL + PLANK_THICK + 12 },
+  ]);
+  paint(ctx, '#000000', null, 0);
+  ctx.globalAlpha = 1;
+
+  // 板の胴体(厚み)
   polygon(ctx, [
     { x: row.left, y: yL },
     { x: row.right, y: yR },
@@ -169,55 +364,99 @@ export function drawPlank(ctx: Ctx, row: Row): void {
   ]);
   paint(ctx, COLORS.plankSide, COLORS.ink, LINE_W);
 
-  // 上面
-  ctx.beginPath();
-  ctx.moveTo(row.left, yL);
-  ctx.lineTo(row.right, yR);
-  ctx.strokeStyle = COLORS.plankTop;
-  ctx.lineWidth = 7;
-  ctx.lineCap = 'butt';
-  ctx.stroke();
+  // 上面(明るい帯)
+  polygon(ctx, [
+    { x: row.left, y: yL },
+    { x: row.right, y: yR },
+    { x: row.right, y: yR + 8 },
+    { x: row.left, y: yL + 8 },
+  ]);
+  paint(ctx, COLORS.plankTop, null, 0);
 
-  // 溝(低い側)の縁。コインはここで止まる
-  const notch = notchPos(row);
-  const notchTopY = row.notchY;
-  line(
+  // 木目
+  ctx.globalAlpha = 0.22;
+  const midY = (x: number) => plankSurfaceY(row, x) + PLANK_THICK * 0.62;
+  ctx.beginPath();
+  ctx.moveTo(row.left + 12, midY(row.left + 12));
+  ctx.lineTo(row.right - 12, midY(row.right - 12));
+  ctx.strokeStyle = COLORS.plankEdge;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // 溝(先端のくぼみ)。コインはここに座ってレバーにもたれる
+  ellipse(ctx, gPos.x - flickDirX(row) * 6, row.grooveY + 2.5, 17, 5);
+  paint(ctx, 'rgba(0,0,0,0.28)', null, 0);
+
+  // 先端の丸い角
+  circle(ctx, gPos.x, row.grooveY + PLANK_THICK / 2, PLANK_THICK / 2);
+  paint(ctx, COLORS.plankSide, COLORS.ink, LINE_W);
+
+  // 高い端の返し(ストッパー)
+  const dirIn = downhillDirX(row);
+  roundRect(ctx, hiX - 9, hiY - PLANK_LIP - 4, 18, PLANK_LIP + PLANK_THICK + 4, 6);
+  paint(ctx, COLORS.plankEdge, COLORS.ink, LINE_W);
+  void dirIn;
+
+  // ネジ
+  screw(ctx, hiX + downhillDirX(row) * 30, plankSurfaceY(row, hiX + downhillDirX(row) * 30) + PLANK_THICK * 0.55, 5);
+  screw(
     ctx,
-    { x: notch.x, y: notchTopY + 2 },
-    { x: notch.x, y: notchTopY - 26 },
-    COLORS.plankEdge,
-    10,
-  );
-  // 高い側の縁。転がり出ないための小さな壁
-  const highX = row.notchSide === 'right' ? row.left : row.right;
-  line(
-    ctx,
-    { x: highX, y: row.highY + 2 },
-    { x: highX, y: row.highY - 18 },
-    COLORS.plankEdge,
-    8,
+    gPos.x + downhillDirX(row) * -34 + downhillDirX(row) * 0,
+    plankSurfaceY(row, gPos.x - downhillDirX(row) * 34) + PLANK_THICK * 0.55,
+    5,
   );
 }
 
-/** レバー。溝の外側に立ち、コインをはたき出す */
-export function drawLever(ctx: Ctx, row: Row, swing: number): void {
-  const notch = notchPos(row);
-  const outward = -downhillDirX(row);
-  const bx = notch.x + -outward * 4;
-  const by = row.notchY + 4;
+// ---------------------------------------------------------------- レバー(ハンマー)
 
-  // 水平からの角度。静止時は寝ていて、はたくと立つ
-  const deg = 58 - swing * 50;
+/**
+ * レバー。板の先端の下にぶら下がるハンマーで、発射すると
+ * 外向きに振り上がって溝のコインを下からはたき出す。
+ */
+export function drawLever(ctx: Ctx, row: Row, lever: LeverState): void {
+  const gPos = groovePos(row);
+  const out = flickDirX(row);
+  const pivot: Vec2 = { x: gPos.x - out * 2, y: row.grooveY + PLANK_THICK + 20 };
+  const len = 44;
+
+  // 姿勢: swing<0 はタメ(内側へ巻き上げ)、swing>0 は打撃(外向きに振り上げ)
+  const deg = -10 + (lever.swing < 0 ? lever.swing * 34 : lever.swing * 58);
   const rad = (deg * Math.PI) / 180;
-  const len = 58;
-  const ex = bx - outward * Math.cos(rad) * len;
-  const ey = by - Math.sin(rad) * len;
+  const head: Vec2 = {
+    x: pivot.x + out * Math.sin(rad) * len,
+    y: pivot.y - Math.cos(rad) * len,
+  };
 
-  line(ctx, { x: bx, y: by }, { x: ex, y: ey }, COLORS.ink, 13);
-  line(ctx, { x: bx, y: by }, { x: ex, y: ey }, COLORS.lever, 8);
-  circle(ctx, ex, ey, 11);
-  paint(ctx, COLORS.lever, COLORS.ink, 3);
-  circle(ctx, bx, by, 8);
+  // 打撃の残像(扇)
+  if (lever.swing > 0.12 && lever.flash > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.28 * lever.flash;
+    ctx.beginPath();
+    ctx.moveTo(pivot.x, pivot.y);
+    const a0 = -Math.PI / 2 + out * ((-44 * Math.PI) / 180);
+    const a1 = -Math.PI / 2 + out * rad;
+    ctx.arc(pivot.x, pivot.y, len + 8, a0, a1, out < 0);
+    ctx.closePath();
+    ctx.fillStyle = COLORS.accent;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 台座
+  roundRect(ctx, pivot.x - 16, pivot.y - 6, 32, 22, 7);
+  paint(ctx, '#8E8A82', COLORS.ink, 3.5);
+
+  // 腕
+  line(ctx, pivot, head, COLORS.ink, 13);
+  line(ctx, pivot, head, COLORS.lever, 8);
+  // ハンマーの頭
+  circle(ctx, head.x, head.y, 13);
+  paint(ctx, COLORS.lever, COLORS.ink, 3.5);
+  circle(ctx, head.x - 3 * out, head.y - 3, 4.5);
+  paint(ctx, 'rgba(255,255,255,0.55)', null, 0);
+  // 軸
+  circle(ctx, pivot.x, pivot.y, 7);
   paint(ctx, COLORS.leverDark, COLORS.ink, 3);
 }
 
@@ -228,34 +467,65 @@ export function drawWinPocket(ctx: Ctx, pocket: WinPocket, wave: number): void {
   const cx = (pocket.left + pocket.right) / 2;
   const top = pocket.y;
 
-  // 受け口
-  ctx.beginPath();
-  ctx.moveTo(pocket.left, top);
-  ctx.lineTo(pocket.right, top);
-  ctx.lineTo(pocket.right - 18, top + 46);
-  ctx.lineTo(pocket.left + 18, top + 46);
-  ctx.closePath();
+  // 受け口の金のカップ
+  polygon(ctx, [
+    { x: pocket.left, y: top },
+    { x: pocket.right, y: top },
+    { x: pocket.right - 14, y: top + 52 },
+    { x: pocket.left + 14, y: top + 52 },
+  ]);
   paint(ctx, COLORS.pocket, COLORS.ink, LINE_W);
+  polygon(ctx, [
+    { x: pocket.left + 8, y: top + 8 },
+    { x: pocket.right - 8, y: top + 8 },
+    { x: pocket.right - 18, y: top + 44 },
+    { x: pocket.left + 18, y: top + 44 },
+  ]);
+  paint(ctx, COLORS.pocketDark, null, 0);
+  // 口の中
+  ellipse(ctx, cx, top + 6, w / 2 - 10, 9);
+  paint(ctx, COLORS.hole, COLORS.ink, 3);
 
-  // 両端の縁
+  // 両端の柱
   for (const x of [pocket.left, pocket.right]) {
-    roundRect(ctx, x - 9, top - 26, 18, 34, 8);
-    paint(ctx, COLORS.plankEdge, COLORS.ink, LINE_W);
+    roundRect(ctx, x - 9, top - 30, 18, 40, 8);
+    paint(ctx, COLORS.flagRed, COLORS.ink, LINE_W);
+    circle(ctx, x, top - 32, 8);
+    paint(ctx, COLORS.pocket, COLORS.ink, 3);
   }
+
+  // きらきら
+  const tw = (Math.sin(wave * 3) + 1) / 2;
+  ctx.globalAlpha = 0.5 + tw * 0.5;
+  for (const [sx, sy, s] of [
+    [cx - w * 0.34, top + 18, 5],
+    [cx + w * 0.3, top + 26, 4],
+  ] as const) {
+    line(ctx, { x: sx - s, y: sy }, { x: sx + s, y: sy }, '#FFFFFF', 3);
+    line(ctx, { x: sx, y: sy - s }, { x: sx, y: sy + s }, '#FFFFFF', 3);
+  }
+  ctx.globalAlpha = 1;
 
   // 旗
   const poleX = cx;
-  const poleTop = top - 84;
-  line(ctx, { x: poleX, y: top - 6 }, { x: poleX, y: poleTop }, COLORS.ink, 6);
-  const wv = Math.sin(wave * 4) * 5;
+  const poleTop = top - 96;
+  line(ctx, { x: poleX, y: top - 2 }, { x: poleX, y: poleTop }, COLORS.ink, 6);
+  const wv = Math.sin(wave * 4) * 6;
   polygon(ctx, [
     { x: poleX, y: poleTop },
-    { x: poleX + 60, y: poleTop + 15 + wv },
-    { x: poleX, y: poleTop + 31 },
+    { x: poleX + 64, y: poleTop + 16 + wv },
+    { x: poleX, y: poleTop + 34 },
   ]);
   paint(ctx, COLORS.flagRed, COLORS.ink, LINE_W);
+  circle(ctx, poleX, poleTop, 6);
+  paint(ctx, COLORS.pocket, COLORS.ink, 3);
 
-  text(ctx, 'あたり', cx, top + 24, { size: Math.min(34, w * 0.22), color: COLORS.accent, outline: 7 });
+  text(ctx, 'あたり', cx, top + 27, {
+    size: Math.min(30, w * 0.24),
+    color: '#FFFFFF',
+    outline: 6,
+    outlineColor: COLORS.ink,
+  });
 }
 
 // ---------------------------------------------------------------- コイン
@@ -266,10 +536,15 @@ export function drawCoin(
   radius: number,
   animalIndex: number,
   spin: number,
+  squash = 0,
 ): void {
   const kind: AnimalKind = ANIMALS[animalIndex % ANIMALS.length]!;
   ctx.save();
   ctx.translate(center.x, center.y);
+  if (squash > 0) {
+    ctx.translate(0, radius * squash * 0.3);
+    ctx.scale(1 + squash * 0.18, 1 - squash * 0.3);
+  }
   circle(ctx, 0, 0, radius);
   paint(ctx, COLORS.coinRim, COLORS.ink, LINE_W);
   ctx.save();
@@ -288,6 +563,26 @@ export function drawCoin(
   circle(ctx, 0, 0, radius * 0.72);
   paint(ctx, COLORS.coinFace, COLORS.ink, 3);
   drawAnimalFace(ctx, kind, 0, 0, radius * 0.5);
+  // つや
+  ctx.beginPath();
+  ctx.arc(-radius * 0.42, -radius * 0.42, radius * 0.5, Math.PI * 0.95, Math.PI * 1.45);
+  ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * 空中のコインの影。どこに落ちるかの手がかりになる。
+ * height は着地面までの距離。
+ */
+export function drawCoinShadow(ctx: Ctx, x: number, surfaceY: number, height: number): void {
+  const k = clamp01(1 - height / 620);
+  ctx.save();
+  ctx.globalAlpha = 0.1 + k * 0.16;
+  ellipse(ctx, x, surfaceY - 3, 12 + k * 14, 4 + k * 3.5);
+  paint(ctx, '#000000', null, 0);
   ctx.restore();
 }
 
@@ -303,36 +598,64 @@ export function drawCoinSlot(ctx: Ctx): void {
     COIN_SLOT_SIZE.h,
     14,
   );
-  paint(ctx, COLORS.panel, COLORS.ink, LINE_W);
-  roundRect(ctx, c.x - 11, c.y - 24, 22, 48, 10);
+  paint(ctx, COLORS.cabinet, COLORS.ink, LINE_W);
+  roundRect(
+    ctx,
+    c.x - COIN_SLOT_SIZE.w / 2 + 7,
+    c.y - COIN_SLOT_SIZE.h / 2 + 7,
+    COIN_SLOT_SIZE.w - 14,
+    COIN_SLOT_SIZE.h - 14,
+    10,
+  );
+  paint(ctx, null, 'rgba(242,179,61,0.9)', 3);
+  roundRect(ctx, c.x - 11, c.y - 30, 22, 42, 10);
   paint(ctx, COLORS.ink, null, 0);
-  text(ctx, 'コイン', c.x, c.y + 54, { size: 22, color: COLORS.ink, outline: 5 });
+  text(ctx, 'コイン', c.x, c.y + 26, { size: 17, color: '#FFF8EC', outline: 0 });
 }
 
-/** 投入口から 1 段目の板へ落ちるシュート */
-export function entryChute(rows: readonly Row[]): { from: Vec2; to: Vec2 } {
+/** 投入口から 1 段目の板の高い端へ降りるシュートの経路 */
+export function entryChute(rows: readonly Row[]): { from: Vec2; ctrl: Vec2; to: Vec2 } {
   const row = rows[0]!;
-  const notch = notchPos(row);
+  const exitX = highEndX(row) + downhillDirX(row) * (COIN_R - 8);
+  const to: Vec2 = { x: exitX, y: plankCoinY(row, exitX) };
   return {
-    from: { x: COIN_SLOT_CENTER.x, y: COIN_SLOT_CENTER.y + 46 },
-    to: { x: notch.x - downhillDirX(row) * 70, y: row.highY - COIN_R },
+    from: { x: COIN_SLOT_CENTER.x, y: COIN_SLOT_CENTER.y + 40 },
+    ctrl: { x: COIN_SLOT_CENTER.x + 6, y: to.y - 92 },
+    to,
+  };
+}
+
+function chutePoint(rows: readonly Row[], u: number): Vec2 {
+  const { from, ctrl, to } = entryChute(rows);
+  const a = 1 - u;
+  return {
+    x: a * a * from.x + 2 * a * u * ctrl.x + u * u * to.x,
+    y: a * a * from.y + 2 * a * u * ctrl.y + u * u * to.y,
   };
 }
 
 export function drawEntryChute(ctx: Ctx, rows: readonly Row[]): void {
-  const { from, to } = entryChute(rows);
-  line(ctx, from, { x: to.x, y: to.y }, COLORS.ink, 18);
-  line(ctx, from, { x: to.x, y: to.y }, '#C8D4DE', 12);
+  const { from, ctrl, to } = entryChute(rows);
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.quadraticCurveTo(ctrl.x, ctrl.y, to.x, to.y - 6);
+  ctx.strokeStyle = COLORS.ink;
+  ctx.lineWidth = 18;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.strokeStyle = '#C8D4DE';
+  ctx.lineWidth = 11;
+  ctx.stroke();
 }
 
 /**
  * 投入アニメのコイン。t は 0..1。
- * 0.00-0.35 投入口へ落ちる / 0.35-0.55 機械の中 / 0.55-1.0 シュートを滑る
+ * 0.00-0.32 投入口へ落ちる / 0.32-0.5 機械の中 / 0.5-1.0 シュートを滑る
  */
 export function drawInsertCoin(ctx: Ctx, rows: readonly Row[], t: number): void {
   const u = clamp01(t);
-  if (u < 0.35) {
-    const k = u / 0.35;
+  if (u < 0.32) {
+    const k = u / 0.32;
     const y = lerp(COIN_SLOT_CENTER.y - 150, COIN_SLOT_CENTER.y - 4, easeOut(k));
     ctx.save();
     ctx.globalAlpha = k > 0.85 ? (1 - k) / 0.15 : 1;
@@ -340,10 +663,9 @@ export function drawInsertCoin(ctx: Ctx, rows: readonly Row[], t: number): void 
     ctx.restore();
     return;
   }
-  if (u < 0.55) return;
-  const k = (u - 0.55) / 0.45;
-  const { from, to } = entryChute(rows);
-  drawCoin(ctx, { x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k) }, COIN_R, 0, k * 6);
+  if (u < 0.5) return;
+  const k = (u - 0.5) / 0.5;
+  drawCoin(ctx, chutePoint(rows, k), COIN_R, 0, k * 6);
 }
 
 // ---------------------------------------------------------------- プランジャー
@@ -353,7 +675,9 @@ export function drawPlunger(ctx: Ctx, knobY: number, pull: number): void {
   const anchorY = KNOB_REST.y - 40;
 
   roundRect(ctx, x - 78, anchorY - 20, 156, 26, 12);
-  paint(ctx, COLORS.panel, COLORS.ink, LINE_W);
+  paint(ctx, COLORS.cabinetTrim, COLORS.ink, LINE_W);
+  screw(ctx, x - 62, anchorY - 7, 5);
+  screw(ctx, x + 62, anchorY - 7, 5);
 
   const coils = 6;
   const span = knobY - anchorY;
@@ -423,7 +747,7 @@ export function drawHandGuide(ctx: Ctx, knobY: number, phase: number): void {
 export function drawGiveUpButton(ctx: Ctx, holdProgress: number): void {
   const c = GIVEUP_CENTER;
   circle(ctx, c.x, c.y, GIVEUP_R);
-  paint(ctx, 'rgba(255,248,236,0.9)', COLORS.ink, LINE_W);
+  paint(ctx, 'rgba(255,248,236,0.92)', COLORS.ink, LINE_W);
   text(ctx, 'やめる', c.x, c.y, { size: 20, color: COLORS.ink });
   if (holdProgress > 0) {
     ctx.beginPath();
@@ -508,66 +832,95 @@ export function drawTitleLogo(ctx: Ctx, center: Vec2, t: number): void {
   ctx.save();
   ctx.translate(center.x, center.y);
 
-  // 降りていく段々の絵
-  for (let i = 0; i < 4; i++) {
-    const y = -50 + i * 34;
-    const w = 150 - i * 6;
-    const x = i % 2 === 0 ? -w : 0;
-    roundRect(ctx, x, y, w, 15, 7);
+  // ジグザグに降りるレールの絵
+  const bars: Array<[number, number, number]> = [
+    [-20, -66, 150],
+    [-150, -28, 150],
+    [-20, 10, 150],
+    [-150, 48, 150],
+  ];
+  bars.forEach(([bx, by, bw], i) => {
+    const dir = i % 2 === 0 ? 1 : -1;
+    ctx.save();
+    ctx.translate(bx + bw / 2, by);
+    ctx.rotate(dir * -0.09);
+    roundRect(ctx, -bw / 2, -8, bw, 16, 8);
     paint(ctx, COLORS.plankTop, COLORS.ink, LINE_W);
-  }
-  // 転がり降りるコイン
-  const k = (t * 0.6) % 1;
-  drawCoin(ctx, { x: lerp(-120, 110, k), y: lerp(-58, 44, k) }, 24, 0, k * 10);
+    ctx.restore();
+    // 穴
+    ellipse(ctx, bx + (dir > 0 ? -34 : bw + 34), by + 4, 15, 9);
+    paint(ctx, COLORS.hole, COLORS.holeRing, 4);
+  });
 
-  drawCheerAnimal(ctx, 'usagi', -128, 74, 50, 0.3 + Math.sin(t * 2.4) * 0.2);
-  drawCheerAnimal(ctx, 'kuma', 128, 74, 48, 0.3 + Math.sin(t * 2.4 + 1.6) * 0.2);
+  // 転がり降りるコイン
+  const k = (t * 0.55) % 1;
+  const path: Array<[number, number]> = [
+    [116, -80],
+    [-24, -70],
+    [-150, -40],
+    [-24, -14],
+    [116, 20],
+    [-24, 40],
+    [-120, 68],
+  ];
+  const seg = Math.min(path.length - 2, Math.floor(k * (path.length - 1)));
+  const su = k * (path.length - 1) - seg;
+  const px = lerp(path[seg]![0], path[seg + 1]![0], su);
+  const py = lerp(path[seg]![1], path[seg + 1]![1], su) - Math.sin(su * Math.PI) * 20;
+  drawCoin(ctx, { x: px, y: py }, 24, 0, t * 6);
+
+  drawCheerAnimal(ctx, 'usagi', -128, 108, 50, 0.3 + Math.sin(t * 2.4) * 0.2);
+  drawCheerAnimal(ctx, 'kuma', 128, 108, 48, 0.3 + Math.sin(t * 2.4 + 1.6) * 0.2);
   ctx.restore();
 
-  text(ctx, 'どうぶつの', center.x, center.y + 128, { size: 44, color: COLORS.ink, outline: 10 });
-  text(ctx, 'やまくだり', center.x, center.y + 188, {
+  text(ctx, 'どうぶつの', center.x, center.y + 158, { size: 44, color: COLORS.ink, outline: 10 });
+  text(ctx, 'やまくだり', center.x, center.y + 218, {
     size: 66,
     color: COLORS.accent,
     outline: 12,
   });
 }
 
-/** 何段目まで降りたかを、上から下へ並ぶ段で示す */
+/** 何段目まで降りたかを、ジグザグに並ぶ段で示す */
 export function drawResultSteps(ctx: Ctx, center: Vec2, reachedDepth: number, won: boolean): void {
-  const w = 300;
   const h = 210;
   ctx.save();
   ctx.translate(center.x, center.y);
 
   for (let i = 0; i < ROW_COUNT; i++) {
     const y = -h / 2 + (i * h) / ROW_COUNT;
-    const pw = w * 0.42;
-    const x = i % 2 === 0 ? 8 : -pw - 8;
+    const pw = 120;
+    const x = i % 2 === 0 ? 24 : -pw - 24;
     const done = i < reachedDepth;
     roundRect(ctx, x, y, pw, 16, 8);
     paint(ctx, done ? COLORS.plankTop : '#FFFFFF', COLORS.ink, LINE_W);
+    if (done) {
+      circle(ctx, x + (i % 2 === 0 ? 10 : pw - 10), y + 8, 9);
+      paint(ctx, COLORS.coinRim, COLORS.ink, 3);
+    }
   }
 
   // あたりの口
-  const py = h / 2 + 6;
-  roundRect(ctx, -60, py, 120, 30, 10);
-  paint(ctx, won ? COLORS.accent : '#FFFFFF', COLORS.ink, LINE_W);
-  if (won) text(ctx, 'あたり', 0, py + 15, { size: 22, color: '#FFFFFF' });
+  const py = h / 2 + 8;
+  roundRect(ctx, -140, py, 116, 30, 10);
+  paint(ctx, won ? COLORS.pocket : '#FFFFFF', COLORS.ink, LINE_W);
+  if (won) text(ctx, 'あたり', -82, py + 15, { size: 20, color: COLORS.ink });
 
   ctx.restore();
 }
 
 // ---------------------------------------------------------------- 応援どうぶつ
 
-/** 各段の板の上に立たせる。板より先に描くので腰から下が隠れる */
+/** 各段の板の上、高い端の近くに立たせる。コインの通り道(溝側)を避ける */
 export function drawSideAnimals(ctx: Ctx, rows: readonly Row[], t: number): void {
   const kinds: AnimalKind[] = ['risu', 'neko', 'panda', 'inu', 'pengin'];
   rows.forEach((row, i) => {
     const kind = kinds[i % kinds.length]!;
-    // 溝と反対側(高い側)に寄せて、コインの通り道を避ける
-    const x = row.notchSide === 'right' ? row.left + 54 : row.right - 54;
-    const size = 46;
+    const x = highEndX(row) + downhillDirX(row) * 44;
+    const size = 44;
     const y = plankSurfaceY(row, x) - size * 0.52;
     drawCheerAnimal(ctx, kind, x, y, size, 0.2 + Math.sin(t * 2.2 + i * 1.3) * 0.18);
   });
 }
+
+export { clamp };

@@ -1,8 +1,17 @@
 /**
  * 全チューニング定数と共有型。
  *
- * このゲームは「上から下へ降りる」。コインは右上から入り、各段の溝(みぞ)から
- * 横に弾かれて 1 段下の板に着地する。板を外すと穴に落ちてコインは没収される。
+ * このゲームは「上から下へ降りる」。コインは右上から入り、レール(板)を
+ * 転がり降りて先端の溝でレバーにもたれて止まる。プランジャーを離すと
+ * レバーがコインを**外向き(レールの先端の先)**へ弾き出し、放物線を描いて
+ * 1 段下のレールに飛び移る。弱すぎれば手前の丸穴、強すぎれば奥の丸穴に
+ * 落ちてコインは没収される。
+ *
+ * レールはジグザグ(右寄り→左寄り→右寄り…)に配置され、弾く向きは常に
+ * 「自分が乗っているレールから離れる向き」になる。こうすることで、
+ * 飛行中のコインが自分のレールを横切ることが構造的になくなる。
+ * (旧設計は「溝と反対向き=自分の板の上を逆走して飛ぶ」だったため、
+ * どんな弾道でも自分の板にめり込む幾何的な欠陥があった。§改訂履歴(4))
  *
  * このファイルは副作用を持たない葉ノードで、すべてのモジュールから参照される。
  * 数値を変更したら必ず `npm run verify` と `npm test` を実行すること。
@@ -22,21 +31,24 @@ export interface Rect {
   h: number;
 }
 
-/** 溝(コインが止まる端)がどちら側か。コインはその反対向きに弾き出される */
-export type NotchSide = 'left' | 'right';
+/**
+ * 溝(コインが止まるレール先端)が板のどちらの端にあるか。
+ * レバーはその先端に立ち、コインは**その端のさらに外**へ弾き出される。
+ */
+export type GrooveSide = 'left' | 'right';
 
-/** 1 段ぶんの板 */
+/** 1 段ぶんのレール(板) */
 export interface Row {
   index: number;
   /** 板の左端 x */
   left: number;
   /** 板の右端 x */
   right: number;
-  /** 溝の側。'right' なら右端が低く、コインは右端で止まって左へ弾かれる */
-  notchSide: NotchSide;
-  /** 溝(板の低い側)の y */
-  notchY: number;
-  /** 板の高い側の y。notchY より PLANK_DROP だけ小さい */
+  /** 溝(低い側の先端)がどちらの端か */
+  grooveSide: GrooveSide;
+  /** 溝側の板面の y(板はここへ向かって下る) */
+  grooveY: number;
+  /** 反対側(高い端)の板面の y。grooveY - PLANK_DROP */
   highY: number;
 }
 
@@ -44,7 +56,7 @@ export interface Row {
 export interface WinPocket {
   left: number;
   right: number;
-  /** 受け口の高さ。コイン中心がこの y に達したら成功 */
+  /** 受け口の高さ。コイン中心がこの y に達したら判定する */
   y: number;
 }
 
@@ -79,60 +91,71 @@ export const BOARD_TOP = 40;
 /** 盤面の下端。プランジャー帯を画面の 22% に抑えるためここまで広げてある */
 export const BOARD_BOTTOM = 994;
 
+export const BOARD_CENTER_X = (BOARD_LEFT + BOARD_RIGHT) / 2;
+
 export const ROW_COUNT = 5;
 /** 溝から溝までの垂直距離。全段共通 */
 export const ROW_GAP = 145;
 /** 1 段目の溝の y */
 export const ROW_TOP_Y = 210;
-/** 板の高い側と低い側(溝)の落差。コインが溝まで転がるための傾き */
-export const PLANK_DROP = 22;
 
 /**
- * 溝から板の手前側の端までの距離(= 弱すぎたときに落ちる穴の幅)。
+ * 中央の隙間(=「手前の穴」)の幅。すべての段の溝はこの隙間を挟んで
+ * 向かい合う 2 本の柱状に並ぶ:
+ *   偶数段(1,3,5 段目)の溝 x = BOARD_CENTER_X + GROOVE_GAP/2(板は右へ伸びる)
+ *   奇数段(2,4 段目)  の溝 x = BOARD_CENTER_X - GROOVE_GAP/2(板は左へ伸びる)
  *
  * 0 にしてはならない。0 だと「弱すぎ」で落ちる余地が無くなり、
  * 強すぎでしか失敗しない片側だけのゲームになる。
  */
-export const NEAR_GAP = 120;
+export const GROOVE_GAP = 120;
+export const GROOVE_EVEN_X = BOARD_CENTER_X + GROOVE_GAP / 2;
+export const GROOVE_ODD_X = BOARD_CENTER_X - GROOVE_GAP / 2;
 
-/** 盤面の中心 x。溝の位置はここを軸に左右対称に決まる */
-export const BOARD_CENTER_X = (BOARD_LEFT + BOARD_RIGHT) / 2;
+/** 板の高い端と溝(低い端)の落差。コインが溝まで転がるための傾き */
+export const PLANK_DROP = 20;
+/** 板の厚み。コインはこの実体と衝突し、決して貫通しない */
+export const PLANK_THICK = 20;
+/** 高い端の返し(ストッパー)の高さ。コインが高い側から転がり出るのを防ぐ */
+export const PLANK_LIP = 12;
 
 /**
- * 溝の x を板幅から導く。
- *
- * 右の溝から左へ弾いたコインが着地する板の左端が、そのまま次の溝になるように
- * 取ってある。これにより 5 つの遷移がすべて同じ「横に飛ぶ距離」になり、
- * 弾き力の適正範囲が段によってばらつかない。
+ * 空中のコインが「1 段下の板面レベル」をこれだけ下回ったら穴に落ちたとみなす。
+ * 板の実体衝突(端で跳ねずに止まる)を先に解決した上での最終判定。
  */
-export function notchOffset(plankWidth: number): number {
-  return (NEAR_GAP + plankWidth) / 2;
-}
+export const CAPTURE_BELOW = 14;
 
 // ---------------------------------------------------------------- 物理
 
 export const GRAVITY = 2200; // px/s^2
 /** 板の上を転がるときの減衰 (1/s) */
-export const ROLL_DAMPING = 1.6;
+export const ROLL_DAMPING = 1.4;
 export const FIXED_DT = 1 / 60;
 /** タブ復帰時のスパイラル防止 */
 export const MAX_FRAME_TIME = 0.25;
+/**
+ * 空中の 1 サブステップあたりの最大移動量 (px)。
+ * これを超えないよう 1 フレームを分割して積分し、高速時のすり抜けを防ぐ。
+ */
+export const MAX_SUBSTEP_MOVE = 6;
 
 // ---------------------------------------------------------------- 弾き
 
-export const P_MIN = 200; // px/s
-export const P_MAX = 1000; // px/s
+export const P_MIN = 250; // px/s
+export const P_MAX = 800; // px/s
 /**
  * 弾く角度。水平からの仰角。
- * 少し上向きにすることで放物線が見え、「弾かれた」感じが出る。
+ * レバーがコインを下からはたき上げるイメージで、放物線がはっきり見える。
  */
-export const FLICK_RISE_DEG = 12;
+export const FLICK_RISE_DEG = 28;
 export const FLICK_RISE = (FLICK_RISE_DEG * Math.PI) / 180;
-/** 溝からこの距離以内にいるコインだけが弾かれる。広めに取る */
+/** 溝からこの距離以内にいる onPlank のコインだけが弾かれる。広めに取る */
 export const FLICK_ZONE_PX = 90;
-export const FLICK_COOLDOWN = 0.3; // s
+export const FLICK_COOLDOWN = 0.35; // s
 /** レバーのはたきアニメの長さ */
-export const LEVER_SWING_TIME = 0.2; // s
+export const LEVER_SWING_TIME = 0.22; // s
+/** プランジャーを離してからレバーがコインに当たるまでの間 */
+export const LEVER_HIT_DELAY = 0.06; // s
 
 // ---------------------------------------------------------------- プランジャー
 
@@ -166,6 +189,8 @@ export const INSERT_ANIM = 1.4; // s
 export const FALL_ANIM = 1.0; // s
 export const WIN_ANIM = 1.5; // s
 export const STAMP_ANIM = 0.6; // s
+/** 着地のつぶれ(スカッシュ)演出の長さ */
+export const LAND_SQUASH_TIME = 0.14; // s
 
 /** コイン投入口。盤面の右上 */
 export const COIN_SLOT_CENTER: Vec2 = { x: 618, y: 96 };
@@ -174,8 +199,8 @@ export const COIN_SLOT_SIZE = { w: 118, h: 84 } as const;
 // ---------------------------------------------------------------- 難易度
 
 export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
-  easy: { id: 'easy', label: 'やさしい', plankWidth: 330 },
-  normal: { id: 'normal', label: 'ふつう', plankWidth: 160 },
+  easy: { id: 'easy', label: 'やさしい', plankWidth: 190 },
+  normal: { id: 'normal', label: 'ふつう', plankWidth: 110 },
 };
 
 // ---------------------------------------------------------------- 色
@@ -188,16 +213,35 @@ export const COLORS = {
   mountain: '#8CC63F',
   mountainHi: '#B5E061',
   mountainSh: '#5FA32A',
-  plankTop: '#D9A05B',
-  plankSide: '#A9713A',
+
+  // 筐体(実機の赤いキャビネット)
+  cabinet: '#D8452F',
+  cabinetDark: '#A93223',
+  cabinetTrim: '#F2B33D',
+  cabinetTrimDark: '#C98F1E',
+
+  // 盤面の化粧板
+  boardFace: '#FFF3CF',
+  boardFaceDeep: '#F5DE9E',
+
+  // レール(板)
+  plankTop: '#F5B04C',
+  plankSide: '#C97F23',
   plankEdge: '#6B4423',
+
   lever: '#E8503A',
   leverDark: '#B23324',
-  hole: '#3A2A18',
-  holeRim: '#241708',
+
+  // 丸穴(こげ茶の落とし穴+オレンジのリム)
+  hole: '#2A1B0C',
+  holePit: '#120B04',
+  holeRing: '#FF7A2F',
+  holeRingDark: '#D65A17',
+
   coinRim: '#F5C242',
   coinFace: '#FFF3D0',
-  pocket: '#F2E9D8',
+  pocket: '#F5C242',
+  pocketDark: '#D9A227',
   flagRed: '#E8503A',
   ink: '#3B2A1A',
   panel: '#FFF8EC',

@@ -1,5 +1,5 @@
 /**
- * ゲーム画面。コインは右上から入り、5 段を降りて、あたりの口を目指す。
+ * ゲーム画面。コインは右上から入り、レールを 5 段降りて、あたりの口を目指す。
  */
 
 import {
@@ -14,6 +14,8 @@ import {
   GIVEUP_RING_DELAY,
   GUIDE_IDLE_DELAY,
   INSERT_ANIM,
+  LAND_SQUASH_TIME,
+  LEVER_HIT_DELAY,
   ROW_COUNT,
   WIN_ANIM,
   type DifficultyConfig,
@@ -21,7 +23,15 @@ import {
   type Vec2,
   type WinPocket,
 } from '../config.ts';
-import { buildHoles, buildRows, buildWinPocket, type Hole } from '../game/board.ts';
+import {
+  buildHoles,
+  buildRows,
+  buildWinPocket,
+  groovePos,
+  onPlank,
+  plankSurfaceY,
+  type Hole,
+} from '../game/board.ts';
 import {
   canFlick,
   createCoin,
@@ -41,24 +51,26 @@ import {
   type PlungerState,
 } from '../game/plunger.ts';
 import {
-  drawBoardBackground,
+  drawBoardFace,
   drawBoardFrame,
-  drawCabinet,
+  drawCabinetBase,
+  drawCabinetLower,
   drawCoin,
+  drawCoinShadow,
   drawCoinSlot,
   drawEntryChute,
   drawGiveUpButton,
   drawHandGuide,
-  drawHole,
   drawInsertCoin,
   drawLever,
   drawPlank,
   drawPlunger,
+  drawRoundHole,
+  drawRoundHoleFront,
   drawSideAnimals,
-  drawSky,
-  drawSunAndClouds,
   drawWinPocket,
 } from '../render/drawings.ts';
+import { ParticleSystem } from '../render/particles.ts';
 import { clamp01, dist, easeOut, lerp, text, type Ctx } from '../render/shapes.ts';
 import { stampIndexFor } from '../save.ts';
 import type { GameParams, Outcome, PointerPhase, Scene, SceneContext } from './scene.ts';
@@ -78,11 +90,21 @@ export class GameScene implements Scene {
   private coin: Coin = createCoin();
   private plunger: PlungerState = createPlunger();
   private levers: LeverState[] = createLevers();
+  private particles = new ParticleSystem();
+
+  /** レバーを振ってからコインに当たるまでのわずかな間 */
+  private pendingPower: number | null = null;
+  private pendingTimer = 0;
 
   /** 何段目まで降りたか (1..ROW_COUNT) */
   private depth = 1;
   private outcome: Outcome | null = null;
   private endingTimer = 0;
+
+  /** 着地のつぶれ演出の残り時間 */
+  private squashTimer = 0;
+  /** 端にぶつかる火花の連発防止 */
+  private lastBonk = -1;
 
   private giveUpHold = 0;
   private giveUpPointerId: number | null = null;
@@ -106,9 +128,14 @@ export class GameScene implements Scene {
     this.coin = createCoin();
     this.plunger = createPlunger();
     this.levers = createLevers();
+    this.particles.clear();
+    this.pendingPower = null;
+    this.pendingTimer = 0;
     this.depth = 1;
     this.outcome = null;
     this.endingTimer = 0;
+    this.squashTimer = 0;
+    this.lastBonk = -1;
     this.giveUpHold = 0;
     this.giveUpPointerId = null;
     this.flagWave = 0;
@@ -116,6 +143,7 @@ export class GameScene implements Scene {
 
   exit(): void {
     releasePlunger(this.plunger);
+    this.particles.clear();
   }
 
   // ------------------------------------------------------------ 更新
@@ -125,6 +153,7 @@ export class GameScene implements Scene {
     this.phaseTime += dt;
     this.flagWave += dt;
     updatePlunger(this.plunger, dt);
+    this.particles.update(dt);
 
     switch (this.phase) {
       case 'insert':
@@ -138,7 +167,8 @@ export class GameScene implements Scene {
         this.updatePlay(dt);
         break;
       case 'ending':
-        stepCoin(this.coin, dt, this.rows, this.pocket, this.holes);
+        this.stepCoinWithEffects(dt);
+        updateLevers(this.levers, dt, 0);
         this.endingTimer -= dt;
         if (this.endingTimer <= 0) this.finish();
         break;
@@ -159,17 +189,49 @@ export class GameScene implements Scene {
 
     updateLevers(this.levers, dt, st.grabbed ? st.pull : st.visualPull);
 
+    // レバーが振り上がった瞬間にコインを弾く
+    if (this.pendingPower !== null) {
+      this.pendingTimer -= dt;
+      if (this.pendingTimer <= 0) {
+        const power = this.pendingPower;
+        this.pendingPower = null;
+        if (flickCoin(this.coin, this.rows, power)) {
+          this.particles.emitStars({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R * 0.6 }, 5);
+        }
+      }
+    }
+
+    this.stepCoinWithEffects(dt);
+  }
+
+  private stepCoinWithEffects(dt: number): void {
+    if (this.squashTimer > 0) this.squashTimer = Math.max(0, this.squashTimer - dt);
+
     const r = stepCoin(this.coin, dt, this.rows, this.pocket, this.holes);
+
     if (this.coin.state === 'onPlank') {
       this.depth = Math.max(this.depth, this.coin.rowIndex + 1);
     }
-    if (r.fellInHole) {
-      this.beginEnding('hole');
-      return;
+    if (r.landedOnRow !== null) {
+      this.squashTimer = LAND_SQUASH_TIME;
+      this.particles.emitPuff({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R });
     }
-    if (r.reachedWin) {
-      this.depth = ROW_COUNT;
-      this.beginEnding('win');
+    if (r.bonk && this.time - this.lastBonk > 0.25) {
+      this.lastBonk = this.time;
+      this.particles.emitStars(r.bonk, 4, '#FFD24A');
+    }
+    if (this.phase !== 'ending') {
+      if (r.fellInHole) {
+        this.particles.emitPuff({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R * 0.5 }, 4);
+        this.beginEnding('hole');
+        return;
+      }
+      if (r.reachedWin) {
+        this.depth = ROW_COUNT;
+        this.particles.emitConfetti({ x: this.coin.pos.x, y: this.coin.pos.y - 120 }, 26, 240);
+        this.particles.emitStars(this.coin.pos, 8, '#FFF3B0');
+        this.beginEnding('win');
+      }
     }
   }
 
@@ -177,6 +239,7 @@ export class GameScene implements Scene {
     this.outcome = outcome;
     this.phase = 'ending';
     this.phaseTime = 0;
+    this.pendingPower = null;
     releasePlunger(this.plunger);
     this.endingTimer = outcome === 'hole' ? FALL_ANIM : outcome === 'win' ? WIN_ANIM : 0;
   }
@@ -239,7 +302,8 @@ export class GameScene implements Scene {
         const power = plungerPointerUp(this.plunger);
         if (power !== null) {
           triggerLevers(this.levers);
-          flickCoin(this.coin, this.rows, power);
+          this.pendingPower = power;
+          this.pendingTimer = LEVER_HIT_DELAY;
         }
         break;
       }
@@ -257,21 +321,22 @@ export class GameScene implements Scene {
   // ------------------------------------------------------------ 描画
 
   render(ctx: Ctx): void {
-    drawSky(ctx);
-    drawSunAndClouds(ctx, this.time);
-    drawBoardBackground(ctx);
+    drawCabinetBase(ctx);
+    drawBoardFace(ctx, this.rows, this.pocket);
 
-    drawSideAnimals(ctx, this.rows, this.time);
-    for (const h of this.holes) drawHole(ctx, h);
     drawEntryChute(ctx, this.rows);
-    for (const row of this.rows) drawPlank(ctx, row);
+    for (const h of this.holes) drawRoundHole(ctx, h);
     drawWinPocket(ctx, this.pocket, this.flagWave);
-    for (const row of this.rows) drawLever(ctx, row, this.levers[row.index]?.swing ?? 0);
-
-    drawBoardFrame(ctx);
-    drawCabinet(ctx);
+    drawSideAnimals(ctx, this.rows, this.time);
+    for (const row of this.rows) drawPlank(ctx, row);
+    for (const row of this.rows) drawLever(ctx, row, this.levers[row.index]!);
 
     this.renderCoin(ctx);
+    this.particles.render(ctx);
+
+    drawBoardFrame(ctx);
+    drawCabinetLower(ctx);
+
     drawCoinSlot(ctx);
     if (this.phase === 'insert') {
       drawInsertCoin(ctx, this.rows, clamp01(this.phaseTime / INSERT_ANIM));
@@ -297,30 +362,63 @@ export class GameScene implements Scene {
     const c = this.coin;
 
     if (c.state === 'falling') {
-      // 穴に吸い込まれて消える
-      const t = clamp01(c.timer / FALL_ANIM);
-      const target = c.hole
-        ? { x: (c.hole.left + c.hole.right) / 2, y: c.hole.y + 12 }
-        : c.pos;
-      const pos = {
-        x: lerp(c.pos.x, target.x, easeOut(t)),
-        y: lerp(c.pos.y, target.y, easeOut(t)),
-      };
-      ctx.save();
-      ctx.globalAlpha = 1 - t * 0.6;
-      drawCoin(ctx, pos, Math.max(1, COIN_R * (1 - easeOut(t) * 0.85)), 0, c.spin);
-      ctx.restore();
+      this.renderFallingCoin(ctx, c);
       return;
     }
 
     if (c.state === 'win') {
       const t = clamp01(c.timer / 0.5);
-      const bounce = Math.abs(Math.sin(t * Math.PI * 2)) * (1 - t) * 14;
+      const bounce = Math.abs(Math.sin(t * Math.PI * 2)) * (1 - t) * 16;
       drawCoin(ctx, { x: c.pos.x, y: c.pos.y - bounce }, COIN_R, 0, c.spin);
       return;
     }
 
-    drawCoin(ctx, c.pos, COIN_R, 0, c.spin);
+    if (c.state === 'airborne') {
+      this.renderAirShadow(ctx, c);
+    }
+    const squash =
+      this.squashTimer > 0 ? Math.sin((this.squashTimer / LAND_SQUASH_TIME) * Math.PI) : 0;
+    drawCoin(ctx, c.pos, COIN_R, 0, c.spin, squash);
+  }
+
+  /** 空中のコインの真下、着地面に落ちる影。どこに落ちるかの手がかり */
+  private renderAirShadow(ctx: Ctx, c: Coin): void {
+    const target = c.rowIndex + 1;
+    let surfaceY: number;
+    if (target >= ROW_COUNT) {
+      surfaceY = this.pocket.y + 4;
+    } else {
+      const row = this.rows[target]!;
+      surfaceY = onPlank(row, c.pos.x) ? plankSurfaceY(row, c.pos.x) : row.grooveY + 6;
+    }
+    const height = surfaceY - (c.pos.y + COIN_R);
+    if (height > 6) drawCoinShadow(ctx, c.pos.x, surfaceY, height);
+  }
+
+  /** 丸穴に「ぽとん」と沈む。穴の手前のリムがコインを隠す */
+  private renderFallingCoin(ctx: Ctx, c: Coin): void {
+    const t = clamp01(c.timer / FALL_ANIM);
+    const hole = c.hole;
+    if (!hole) {
+      ctx.save();
+      ctx.globalAlpha = 1 - t;
+      drawCoin(ctx, c.pos, COIN_R * (1 - t * 0.5), 0, c.spin);
+      ctx.restore();
+      return;
+    }
+
+    // 0..0.3: 穴の口まで滑る / 0.3..0.8: 沈む / 0.8..: 消える
+    const slide = easeOut(clamp01(t / 0.3));
+    const sink = clamp01((t - 0.3) / 0.5);
+    const x = lerp(c.fallFrom.x, hole.cx, slide);
+    const y = lerp(Math.min(c.fallFrom.y, hole.cy - COIN_R * 0.4), hole.cy + hole.r * 0.55, sink);
+    const scale = 1 - sink * 0.45;
+
+    ctx.save();
+    if (t > 0.8) ctx.globalAlpha = Math.max(0, 1 - (t - 0.8) / 0.2);
+    drawCoin(ctx, { x, y }, COIN_R * scale, 0, c.spin + slide * 2 + sink * 3);
+    ctx.restore();
+    if (sink > 0) drawRoundHoleFront(ctx, hole);
   }
 
   private giveUpRingProgress(): number {
@@ -346,9 +444,10 @@ export class GameScene implements Scene {
 
   private renderDebug(ctx: Ctx): void {
     const c = this.coin;
+    const g = c.state === 'onPlank' ? groovePos(this.rows[c.rowIndex]!) : null;
     const lines = [
       `phase=${this.phase} state=${c.state}`,
-      `row=${c.rowIndex + 1} x=${c.x.toFixed(0)} vx=${c.vx.toFixed(0)}`,
+      `row=${c.rowIndex + 1} x=${c.x.toFixed(0)} vx=${c.vx.toFixed(0)} groove=${g?.x.toFixed(0) ?? '-'}`,
       `pull=${this.plunger.pull.toFixed(3)} depth=${this.depth}`,
       `diff=${this.difficulty.id} plank=${this.difficulty.plankWidth}`,
     ];

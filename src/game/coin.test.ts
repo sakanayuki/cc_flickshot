@@ -4,6 +4,10 @@
  * このゲームは「適度な強さでだけ 1 段下の板に乗れる」ことがすべてなので、
  * 成功域の広さと、強すぎ・弱すぎの両方で落ちることを直接テストしている。
  * ここが壊れると盤面の数字が正しくても遊べなくなる。
+ *
+ * 加えて「コインが板を貫通しない」ことをテストする。旧設計は
+ * 弾いたコインが自分の板を横切る幾何で、どんな弾道でも板にめり込んで
+ * 見える欠陥があった(改訂履歴(4))。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -15,20 +19,23 @@ import {
   DIFFICULTIES,
   FIXED_DT,
   FLICK_ZONE_PX,
-  NEAR_GAP,
+  GROOVE_GAP,
   P_MAX,
   P_MIN,
+  PLANK_THICK,
   PULL_DEADZONE,
   ROW_COUNT,
   type DifficultyConfig,
+  type Row,
 } from '../config.ts';
 import {
   buildHoles,
   buildRows,
   buildWinPocket,
   flickDirX,
-  notchPos,
+  groovePos,
   onPlank,
+  plankSurfaceY,
 } from './board.ts';
 import {
   canFlick,
@@ -50,7 +57,7 @@ function simulate(d: DifficultyConfig, rowIndex: number, power: number): Outcome
   const pocket = buildWinPocket(d);
   const holes = buildHoles(d);
   const coin = createCoin();
-  placeOnRow(coin, rows, rowIndex, notchPos(rows[rowIndex]!).x);
+  placeOnRow(coin, rows, rowIndex, groovePos(rows[rowIndex]!).x);
   if (!flickCoin(coin, rows, power)) return 'stuck';
   for (let i = 0; i < 900; i++) {
     const r = stepCoin(coin, FIXED_DT, rows, pocket, holes);
@@ -91,9 +98,20 @@ describe('盤面の幾何', () => {
     }
   });
 
-  it.each([EASY, NORMAL])('$label: 溝が右→左と交互になる', (d) => {
-    const sides = buildRows(d).map((r) => r.notchSide);
-    expect(sides).toEqual(['right', 'left', 'right', 'left', 'right']);
+  it.each([EASY, NORMAL])('$label: 溝の端が左→右と交互になる', (d) => {
+    const sides = buildRows(d).map((r) => r.grooveSide);
+    expect(sides).toEqual(['left', 'right', 'left', 'right', 'left']);
+  });
+
+  it.each([EASY, NORMAL])('$label: 弾く向きは板から離れる向き(外向き)', (d) => {
+    for (const row of buildRows(d)) {
+      const g = groovePos(row);
+      const dir = flickDirX(row);
+      // 溝から弾く向きへ進むと、すぐ板の外に出る
+      expect(onPlank(row, g.x + dir * (COIN_R + 1))).toBe(false);
+      // 反対へ進むと板の上(=自分の板を横切って飛ぶことはない)
+      expect(onPlank(row, g.x - dir * (COIN_R + 1))).toBe(true);
+    }
   });
 
   it.each([EASY, NORMAL])('$label: 5つの遷移がすべて同じ横距離・落差', (d) => {
@@ -103,9 +121,9 @@ describe('盤面の幾何', () => {
       const dir = flickDirX(row);
       const t =
         i + 1 < ROW_COUNT
-          ? { near: dir < 0 ? rows[i + 1]!.right : rows[i + 1]!.left, y: rows[i + 1]!.notchY }
+          ? { near: dir < 0 ? rows[i + 1]!.right : rows[i + 1]!.left, y: rows[i + 1]!.grooveY }
           : { near: dir < 0 ? pocket.right : pocket.left, y: pocket.y };
-      return [Math.abs(notchPos(row).x - t.near), t.y - row.notchY];
+      return [Math.abs(groovePos(row).x - t.near), t.y - row.grooveY];
     });
     for (const j of jumps) {
       expect(j[0]).toBeCloseTo(jumps[0]![0]!, 6);
@@ -114,10 +132,10 @@ describe('盤面の幾何', () => {
   });
 
   // 手前の穴が無いと「弱すぎ」で落ちる余地が消える
-  it.each([EASY, NORMAL])('$label: 溝と板の間に手前の穴がある', (d) => {
+  it.each([EASY, NORMAL])('$label: 溝と 1 段下の板の間に手前の穴がある', (d) => {
     const rows = buildRows(d);
-    const gap = Math.abs(notchPos(rows[0]!).x - rows[1]!.right);
-    expect(gap).toBeCloseTo(NEAR_GAP, 6);
+    const gap = Math.abs(groovePos(rows[0]!).x - rows[1]!.right);
+    expect(gap).toBeCloseTo(GROOVE_GAP, 6);
     expect(gap).toBeGreaterThan(COIN_R);
   });
 
@@ -127,6 +145,14 @@ describe('盤面の幾何', () => {
       const at = holes.filter((h) => h.rowIndex === i);
       expect(at.some((h) => h.kind === 'near')).toBe(true);
       expect(at.some((h) => h.kind === 'far')).toBe(true);
+    }
+  });
+
+  it.each([EASY, NORMAL])('$label: 丸穴の見た目が落下範囲に収まる', (d) => {
+    for (const h of buildHoles(d)) {
+      expect(h.cx - h.r).toBeGreaterThanOrEqual(h.left - 1);
+      expect(h.cx + h.r).toBeLessThanOrEqual(h.right + 1);
+      expect(h.r).toBeGreaterThan(0);
     }
   });
 
@@ -141,15 +167,15 @@ describe('弾く', () => {
   it('溝にいるコインは弾ける', () => {
     const rows = buildRows(EASY);
     const c = createCoin();
-    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+    placeOnRow(c, rows, 0, groovePos(rows[0]!).x);
     expect(canFlick(c, rows)).toBe(true);
   });
 
   it('溝から離れていると弾けない', () => {
     const rows = buildRows(EASY);
     const c = createCoin();
-    const notch = notchPos(rows[0]!);
-    placeOnRow(c, rows, 0, notch.x - (FLICK_ZONE_PX + 10));
+    const g = groovePos(rows[0]!);
+    placeOnRow(c, rows, 0, g.x - flickDirX(rows[0]!) * (FLICK_ZONE_PX + 10));
     expect(canFlick(c, rows)).toBe(false);
     expect(flickCoin(c, rows, 600)).toBe(false);
     expect(c.state).toBe('onPlank');
@@ -158,20 +184,23 @@ describe('弾く', () => {
   it('空中のコインは弾けない', () => {
     const rows = buildRows(EASY);
     const c = createCoin();
-    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+    placeOnRow(c, rows, 0, groovePos(rows[0]!).x);
     flickCoin(c, rows, 600);
     expect(c.state).toBe('airborne');
     expect(canFlick(c, rows)).toBe(false);
   });
 
-  it('溝が右の段は左へ、左の段は右へ弾かれる', () => {
+  it('弾く向きが段ごとに左右交互になる', () => {
     const rows = buildRows(EASY);
+    const dirs: number[] = [];
     for (const row of rows) {
       const c = createCoin();
-      placeOnRow(c, rows, row.index, notchPos(row).x);
+      placeOnRow(c, rows, row.index, groovePos(row).x);
       flickCoin(c, rows, 600);
       expect(Math.sign(c.vel.x)).toBe(flickDirX(row));
+      dirs.push(Math.sign(c.vel.x));
     }
+    expect(dirs).toEqual([-1, 1, -1, 1, -1]);
   });
 });
 
@@ -189,24 +218,24 @@ describe('板の上の転がり', () => {
     }
     expect(c.state).toBe('onPlank');
     expect(c.vx).toBe(0);
-    expect(c.x).toBeCloseTo(notchPos(rows[0]!).x, 6);
+    expect(c.x).toBeCloseTo(groovePos(rows[0]!).x, 6);
     expect(canFlick(c, rows)).toBe(true);
   });
 
-  it('着地したコインは溝へ向かって転がる', () => {
+  it('着地したコインは最終的に溝で止まる', () => {
     const rows = buildRows(EASY);
     const pocket = buildWinPocket(EASY);
     const holes = buildHoles(EASY);
     const c = createCoin();
-    placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
-    flickCoin(c, rows, 600);
+    placeOnRow(c, rows, 0, groovePos(rows[0]!).x);
+    flickCoin(c, rows, 500);
     let landed = false;
     for (let i = 0; i < 900 && !landed; i++) {
       landed = stepCoin(c, FIXED_DT, rows, pocket, holes).landedOnRow !== null;
     }
     expect(landed).toBe(true);
-    for (let i = 0; i < 600; i++) stepCoin(c, FIXED_DT, rows, pocket, holes);
-    expect(c.x).toBeCloseTo(notchPos(rows[1]!).x, 6);
+    for (let i = 0; i < 900; i++) stepCoin(c, FIXED_DT, rows, pocket, holes);
+    expect(c.x).toBeCloseTo(groovePos(rows[1]!).x, 6);
   });
 });
 
@@ -252,6 +281,70 @@ describe('成功域(ゲームの根幹)', () => {
   });
 });
 
+// ---------------------------------------------------------------- 貫通しないこと
+
+/** コインの円が板の実体(上面〜底面の帯)にどれだけ食い込んでいるか */
+function penetrationDepth(rows: readonly Row[], x: number, y: number): number {
+  let worst = 0;
+  for (const row of rows) {
+    if (!onPlank(row, x)) continue;
+    const top = plankSurfaceY(row, x);
+    const bottom = top + PLANK_THICK;
+    if (y > top - COIN_R + 1 && y < bottom + COIN_R - 1) {
+      worst = Math.max(worst, Math.min(y - (top - COIN_R + 1), bottom + COIN_R - 1 - y));
+    }
+  }
+  return worst;
+}
+
+describe('板を貫通しない', () => {
+  it.each([EASY, NORMAL])('$label: どのパワーでも飛行中に板にめり込まない', (d) => {
+    const rows = buildRows(d);
+    const pocket = buildWinPocket(d);
+    const holes = buildHoles(d);
+    for (let row = 0; row < ROW_COUNT; row++) {
+      for (let power = P_MIN; power <= P_MAX; power += 25) {
+        const c = createCoin();
+        placeOnRow(c, rows, row, groovePos(rows[row]!).x);
+        flickCoin(c, rows, power);
+        for (let i = 0; i < 300; i++) {
+          stepCoin(c, FIXED_DT, rows, pocket, holes);
+          if (c.state !== 'airborne') break;
+          expect(
+            penetrationDepth(rows, c.pos.x, c.pos.y),
+            `段${row + 1} power=${power}`,
+          ).toBeLessThanOrEqual(4);
+        }
+      }
+    }
+  });
+
+  it('板の先端に横からぶつかったコインは止まって下に落ちる(すり抜けない)', () => {
+    const rows = buildRows(EASY);
+    const pocket = buildWinPocket(EASY);
+    const holes = buildHoles(EASY);
+    const target = rows[1]!; // 板は左へ伸び、右端が溝の先端
+    const c = createCoin();
+    // 先端のすぐ右、板面すれすれの高さから水平に打ち込む
+    c.state = 'airborne';
+    c.rowIndex = 0;
+    c.pos = { x: target.right + COIN_R + 40, y: target.grooveY + PLANK_THICK / 2 };
+    c.vel = { x: -900, y: 0 };
+    let outcome: 'through' | 'stopped' = 'through';
+    for (let i = 0; i < 300; i++) {
+      const r = stepCoin(c, FIXED_DT, rows, pocket, holes);
+      // 板の内部側に抜けたら貫通
+      expect(c.pos.x).toBeGreaterThanOrEqual(target.right - 1);
+      if (r.fellInHole) {
+        outcome = 'stopped';
+        expect(r.fellInHole.kind).toBe('near');
+        break;
+      }
+    }
+    expect(outcome).toBe('stopped');
+  });
+});
+
 // ---------------------------------------------------------------- 頑健性
 
 describe('頑健性', () => {
@@ -262,7 +355,7 @@ describe('頑健性', () => {
     for (let row = 0; row < ROW_COUNT; row++) {
       for (let power = P_MIN; power <= P_MAX; power += 25) {
         const c = createCoin();
-        placeOnRow(c, rows, row, notchPos(rows[row]!).x);
+        placeOnRow(c, rows, row, groovePos(rows[row]!).x);
         flickCoin(c, rows, power);
         for (let i = 0; i < 300; i++) {
           stepCoin(c, FIXED_DT, rows, pocket, holes);
@@ -296,7 +389,7 @@ describe('頑健性', () => {
     const holes = buildHoles(EASY);
     for (let power = P_MIN; power <= P_MAX; power += 10) {
       const c = createCoin();
-      placeOnRow(c, rows, 0, notchPos(rows[0]!).x);
+      placeOnRow(c, rows, 0, groovePos(rows[0]!).x);
       flickCoin(c, rows, power);
       for (let i = 0; i < 900; i++) {
         const r = stepCoin(c, FIXED_DT, rows, pocket, holes);

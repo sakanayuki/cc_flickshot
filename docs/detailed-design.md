@@ -31,7 +31,7 @@
 |---|---|---|
 | 進む向き | 下 → 上 | **上 → 下** |
 | 投入位置 | 左下 | **右上** |
-| 弾く向き | 斜め上(仰角26°) | **ほぼ横**(仰角12°) |
+| 弾く向き | 斜め上(仰角26°) | **ほぼ横**(仰角12°。→ 後に §0.35 で 28° に戻した) |
 | 強すぎたとき | 天井に当たって減速、失敗しない | **奥の穴に落ちて没収** |
 | 弱すぎたとき | 同じ段に戻る | **手前の穴に落ちて没収** |
 | クリア | 山頂のゴールバスケット | **最下段の下のあたりの口** |
@@ -42,21 +42,53 @@
 旧ルール固有の仕組み(上向きシャフト、レーン先端・裏面の当たり判定、リップ越えの転落、
 転がり速度による穴判定、壁での跳ね返り)は**すべて削除した**。
 
+### 0.35 盤面の作り直し(2026-07-28(4))— 貫通の原因と対処
+
+**発注者から「棒を貫通する」との指摘があった。これはチューニングでは直せない
+構造的な欠陥だったため、盤面の幾何と衝突判定を作り直した。**
+
+旧設計は「溝は板の低い**側**」「弾く向きは**溝と反対**」だった。
+つまりコインは自分が乗っている板の上を逆走する形で飛び出す。
+板は飛行方向に向かってせり上がっているので、**どんな弾道でも板の内部を通る**。
+さらに着地判定を「1段下の板だけ」に限っていたため、自分の板との衝突が
+そもそも計算されず、コインが板をすり抜けて見えていた。
+
+| | 旧 | 新 |
+|---|---|---|
+| 板の並び | 中央を挟んで左右にずらす | **ジグザグ**(溝が中央の隙間を挟んで向かい合う) |
+| 溝の位置 | 板の低い「側」 | 板の**先端** |
+| 弾く向き | 溝と反対(=自分の板の上を逆走) | **先端の外**(自分の板から離れる) |
+| 衝突対象 | 1段下の板の上面だけ | **全ての板の実体**(上面+厚み+端面) |
+| 積分 | 1フレーム1回 | **1サブステップ 6px 以下に分割** |
+| 端に当たったとき | 判定なし | 水平の勢いを失ってそのまま落ちる(跳ね返さない) |
+| 穴 | 「板でないところ」の帯 | **丸い落とし穴**(実機と同じオレンジのリム付き) |
+| 仰角 | 12° | **28°** |
+
+新しい幾何では、溝から弾いたコインは即座に板の外へ出る。
+**自分の板を横切ることが構造的にありえない**ので、貫通は幾何のレベルで消えている。
+その上で全板との実体衝突を持たせ、検算 §12-7 が全パワー掃引で担保する。
+
 ### 0.4 設計の中心にある考え方
 
 1. **5つの遷移をすべて同一条件にする。**
    段1→2、2→3、3→4、4→5、段5→あたりの口の「横に飛ぶ距離」と「落差」を完全に等しくする。
-   こうすればチューニング定数は `P_MIN` / `P_MAX` の2つで済み、
+   すべての溝は中央の隙間 `GROOVE_GAP` を挟んで向かい合う2本の柱状に並ぶので、
+   どの遷移も「同じ隙間を飛び越えて同じ幅の板に乗る」になる。
+   チューニング定数は `P_MIN` / `P_MAX` の2つで済み、
    3歳児は「同じ引き方」を5回繰り返せばよい。
-2. **失敗は必ず両側にある。**
-   弱すぎ → 手前の穴、強すぎ → 奥の穴。片側しか失敗しない配置は設計が崩れている証拠なので、
+2. **弾く向きは必ず板から離れる向き。**
+   これを守る限り、飛行中のコインが自分の板と干渉することはない。
+   逆走させると貫通が構造的に発生する(§0.35)。
+3. **失敗は必ず両側にある。**
+   弱すぎ → 間の穴、強すぎ → 奥の穴。片側しか失敗しない配置は設計が崩れている証拠なので、
    検算スクリプトが自動で落とす。
-3. **時間的な制約を作らない。**
+4. **時間的な制約を作らない。**
    着地したコインは板の傾斜で必ず溝まで転がって止まる。
    3歳児が落ち着いてプランジャーを引ける時間を無制限に確保する。
-4. **跳ね返らせない。**
+5. **跳ね返らせない。**
    壁でも板でも跳ね返らせない。跳ね返ると「強すぎたのに壁のおかげで助かる」が起き、
-   *強すぎ = 失敗* というルールが崩れる。
+   *強すぎ = 失敗* というルールが崩れる。板の端に当たったときも、
+   水平の勢いを殺してそのまま落とす。
 
 ---
 
@@ -147,6 +179,23 @@ ctx.setTransform(dpr*scale, 0, 0, dpr*scale, dpr*offsetX, dpr*offsetY)
 
 ## 3. 盤面の幾何
 
+### 3.0 全体像
+
+```
+       [投入口]
+ 段1:        溝◎━━━━━板━━━━━      ← 溝 x=420、板は右へ。左へ弾く
+ 段2:  ━━━━━板━━━━━◎溝            ← 溝 x=300、板は左へ。右へ弾く
+ 段3:        溝◎━━━━━板━━━━━
+ 段4:  ━━━━━板━━━━━◎溝
+ 段5:        溝◎━━━━━板━━━━━
+ 口 :  ━━あたりの口━━             ← 段5 から左へ弾いて入れる
+       └ 間の穴 ┘
+        (x 300..420)
+```
+
+すべての溝は中央の隙間を挟んで**向かい合う2本の柱**に並ぶ。
+弾かれたコインはこの隙間(=間の穴)を飛び越えて1段下の板に乗る。
+
 ### 3.1 段(板)
 
 ```ts
@@ -154,53 +203,59 @@ interface Row {
   index: number;      // 0..4
   left: number;       // 板の左端 x
   right: number;      // 板の右端 x
-  notchSide: 'left' | 'right';
-  notchY: number;     // 溝(板の低い側)の y
-  highY: number;      // 板の高い側の y = notchY - PLANK_DROP
+  grooveSide: 'left' | 'right';   // 溝が板のどちらの「端」か
+  grooveY: number;    // 溝(板の低い先端)の y
+  highY: number;      // 板の高い端の y = grooveY - PLANK_DROP
 }
 ```
 
 - 段数 `ROW_COUNT = 5`。溝の y は `ROW_TOP_Y + i * ROW_GAP` = 210, 355, 500, 645, 790。
-- 溝の側は **右 → 左 → 右 → 左 → 右** と交互(`i % 2 === 0` が右)。
-- 板は溝側に `PLANK_DROP = 22` px だけ下っている。コインはこの傾斜で必ず溝まで転がる。
+- 偶数段(index 0,2,4)は `grooveSide = 'left'`、板は右へ伸び、**左へ**弾く。
+- 奇数段(index 1,3)は `grooveSide = 'right'`、板は左へ伸び、**右へ**弾く。
+- 板は溝側に `PLANK_DROP = 20` px だけ下っている。コインはこの傾斜で必ず溝まで転がる。
+- 板の厚みは `PLANK_THICK = 20`。**この厚みは実体で、コインが衝突する。**
+- 高い端には `PLANK_LIP = 12` の返し(ストッパー)があり、転がり出ない。
 
-### 3.2 溝の x — 5つの遷移を同一条件にする逆算
+### 3.2 溝の x — 5つの遷移を同一条件にする配置
 
 ```ts
-NEAR_GAP = 120                                  // 手前の穴の幅
+GROOVE_GAP   = 120                          // 中央の隙間(= 間の穴の幅)
 BOARD_CENTER_X = (40 + 680) / 2 = 360
-notchOffset(w) = (NEAR_GAP + w) / 2
-notchRight = BOARD_CENTER_X + notchOffset(w)
-notchLeft  = BOARD_CENTER_X - notchOffset(w)
+GROOVE_EVEN_X = 360 + 120/2 = 420           // 偶数段の溝(板は右へ)
+GROOVE_ODD_X  = 360 - 120/2 = 300           // 奇数段の溝(板は左へ)
 ```
 
-右の溝(`notchRight`)から左へ弾いたコインが着地すべき板の左端が、
-そのまま次の段の溝(`notchLeft`)になるように取ってある。
-結果として**どの遷移でも横に飛ぶ距離が `NEAR_GAP = 120` px、落差が `ROW_GAP = 145` px** になる。
+```
+偶数段 → [left, right] = [420,     420 + w]
+奇数段 → [left, right] = [300 - w, 300    ]
+```
 
-> **`NEAR_GAP` を 0 にしてはならない。** 0 にすると「弱すぎ」で落ちる余地が消え、
+溝 420 から左へ弾いたコインが乗るべき板の右端がちょうど 300、
+溝 300 から右へ弾いたコインが乗るべき板の左端がちょうど 420 になる。
+結果として**どの遷移でも横に飛ぶ距離が `GROOVE_GAP = 120` px、落差が `ROW_GAP = 145` px**。
+板幅 `w` を変えても、溝の位置も飛距離も落差も一切動かない。
+だから難易度を変えても指の感覚が変わらない(§5)。
+
+> **`GROOVE_GAP` を 0 にしてはならない。** 0 にすると「弱すぎ」で落ちる余地が消え、
 > 強すぎでしか失敗しない片側だけのゲームになる。
-
-板の左右端:
-
-```
-notchSide === 'right' → [left, right] = [notchRight - w, notchRight]
-notchSide === 'left'  → [left, right] = [notchLeft,      notchLeft + w]
-```
 
 ### 3.3 難易度別の実測値
 
-| | やさしい (w=330) | ふつう (w=160) |
+| | やさしい (w=190) | ふつう (w=110) |
 |---|---|---|
-| `notchOffset` | 225 | 140 |
-| 右の溝 x | 585 | 500 |
-| 左の溝 x | 135 | 220 |
-| 板(溝が右) | 255 .. 585 | 340 .. 500 |
-| 板(溝が左) | 135 .. 465 | 220 .. 380 |
-| 手前の穴を越える横距離 | 120 | 120 |
+| 偶数段の溝 x | 420 | 420 |
+| 奇数段の溝 x | 300 | 300 |
+| 板(偶数段) | 420 .. 610 | 420 .. 530 |
+| 板(奇数段) | 110 .. 300 | 190 .. 300 |
+| 間の穴を飛び越す横距離 | 120 | 120 |
 | 落差 | 145 | 145 |
+| 高い端と壁の隙間(=奥の穴) | 70 | 150 |
 
 どちらも `BOARD_LEFT = 40` .. `BOARD_RIGHT = 680` に収まっている(検算 §12-1)。
+
+> **板幅の上限は「奥の穴が消えないこと」で決まる。** 板を広げると高い端が壁に
+> 近づき、`COIN_R * 2 = 56` を切ると強く弾いたコインが壁で止まって板に戻り、
+> 「強すぎ = 失敗」が成立しなくなる。検算 §12-1 がこれを落とす。
 
 ### 3.4 あたりの口
 
@@ -208,29 +263,41 @@ notchSide === 'left'  → [left, right] = [notchLeft,      notchLeft + w]
 interface WinPocket { left: number; right: number; y: number }
 ```
 
-- 段5(溝は右)から左へ弾いて入れる位置に置く。
-  `left = BOARD_CENTER_X - notchOffset(w)`、`right = left + w`。
+- 段5(溝は左端 x=420)から左へ弾いて入れる位置に置く。
+  奇数段の板とまったく同じ `left = 300 - w`、`right = 300`。
+  6つ目の遷移も他と完全に同一条件になる。
 - `y = ROW_TOP_Y + ROW_COUNT * ROW_GAP = 935`。段5の溝(790)から 145px 下。
 - 幅は板と同じなので、**難易度差はあたりの口にもそのまま効く**。
+- 成功判定 `inWinPocket` は左右 4px ずつ内側に絞る。
+  口の縁ぎりぎりで「入ったのか外れたのか分からない」判定を避けるため。
 
-### 3.5 穴
+### 3.5 穴 — 丸い落とし穴
 
 ```ts
 interface Hole {
   rowIndex: number;            // その穴がある段。ROW_COUNT ならあたりの口の高さ
-  left: number; right: number; y: number;
-  kind: 'near' | 'far';        // 手前(弱すぎ) / 奥(強すぎ)
+  left: number; right: number; // 落下として扱う x 範囲
+  y: number;                   // 落下レベル(その段の板面の高さ)
+  kind: 'near' | 'far';        // 間(弱すぎ) / 奥(強すぎ)
+  cx: number; cy: number; r: number;   // 丸穴の見た目
 }
 ```
 
-穴は「板でないところ」。段2〜段5とあたりの口の高さについて、
-板の左右を `BOARD_LEFT` / `BOARD_RIGHT` まで埋めるように生成する。
+段2〜段5とあたりの口の高さについて、それぞれ2つの穴を作る。
+
+| 種別 | 落下範囲 | 見た目の中心 |
+|---|---|---|
+| `near`(間の穴) | `x 300..420`(全段共通) | 範囲の中央 |
+| `far`(奥の穴) | 着地板の高い端 〜 壁 | **板の端のすぐ先**に寄せる |
 
 - **段1には穴を作らない。** 投入されるだけで、着地判定の対象にならないため。
-- `near` / `far` の向きは、**1つ上の段の溝がどちら側か**で決まる。
-  左へ弾かれてくるなら、着地板の右側が `near`(弱すぎ)、左側が `far`(強すぎ)。
-- 幅が 1px 以下の穴は生成しない(板が壁に接している場合)。
-  この状態は片側の失敗が消えることを意味するので、検算が別途落とす。
+- `far` がどちら側かは、**1つ上の段からどちらへ弾かれてくるか**で決まる。
+- 半径は範囲の幅から導き、`18 .. 44` にクランプする。
+  `far` の中心は範囲の中央ではなく板の端側に寄せる。実機と同じく
+  「棒の端のすぐ先に穴が口を開けている」形にするため
+  (中央に置くと壁ぎわに寄って、飛び越えた先に穴がある感じが出ない)。
+- 幅が 1px 以下の穴は生成しない。この状態は片側の失敗が消えることを
+  意味するので、検算 §12-1 と §12-3 が別途落とす。
 
 ---
 
@@ -263,6 +330,7 @@ interface Coin {
   vel: Vec2;          // airborne のときの速度
   timer: number;      // falling / win の演出経過秒
   hole: Hole | null;  // falling のとき、落ちた穴
+  fallFrom: Vec2;     // falling に入った瞬間の位置(落下演出の始点)
   spin: number;       // 見た目の回転
 }
 ```
@@ -270,72 +338,107 @@ interface Coin {
 ### 4.2 `onPlank` の更新
 
 ```ts
-slope = PLANK_DROP / (row.right - row.left)     // tanθ
-dir   = downhillDirX(row)                       // 溝へ向かう向き
+slope = (row.grooveY - row.highY) / (row.right - row.left)   // tanθ
+dir   = downhillDirX(row)                                     // 溝へ向かう向き = 弾く向き
 a  = GRAVITY * slope * dir - ROLL_DAMPING * vx
 vx += a * dt
 x  += vx * dt
 spin += vx * dt / COIN_R
 ```
 
-- 溝(`notchPos(row).x`)に達したら `x` を溝に固定し `vx = 0`。
-- 板の高い側にも縁があり、転がり出ることはない(こちらも同様に固定)。
+- 溝(`groovePos(row).x`)に達したら `x` を溝に固定し `vx = 0`。ここでレバーにもたれる。
+- 高い端には返し(`PLANK_LIP`)があり、`highEndX(row) + dir * (COIN_R - 8)` で止まる。
 - コイン中心の y は常に `plankCoinY(row, x) = plankSurfaceY(row, x) - COIN_R`。
 
-`GRAVITY = 2200`、`ROLL_DAMPING = 1.6`。
-やさしい (w=330) の傾き `tanθ = 22/330 = 0.0667` → 板を端から端まで転がるのに約 1.6 秒。
+`GRAVITY = 2200`、`ROLL_DAMPING = 1.4`。
+やさしい (w=190) の傾き `tanθ = 20/190 = 0.105` → 板を端から端まで転がるのに約 1.2 秒。
 
 ### 4.3 発射
 
 ```ts
 canFlick(coin, rows) := coin.state === 'onPlank'
-                        && |coin.x - notchPos(row).x| <= FLICK_ZONE_PX (90)
+                        && |coin.x - groovePos(row).x| <= FLICK_ZONE_PX (90)
 
 flickCoin(coin, rows, power):
-  dir = flickDirX(row)          // 溝が右なら -1(左へ)
+  dir = flickDirX(row)          // grooveSide === 'left' なら -1(左へ)
   vel = { x: dir * power * cos(FLICK_RISE),
-          y: -power * sin(FLICK_RISE) }   // FLICK_RISE = 12°
+          y: -power * sin(FLICK_RISE) }   // FLICK_RISE = 28°
   state = 'airborne'
 ```
 
+- **`flickDirX` は必ず「板から離れる向き」を返す。** 溝は板の先端なので、
+  弾かれたコインは即座に板の外に出る。これが貫通しない設計の根拠(§0.35)。
 - コインは必ず溝で停止するため、実際には常にゾーン内にいる。
-  `FLICK_ZONE_PX = 90` は `NEAR_GAP = 120` より狭くしてある(検算 §12-6)。
-- 仰角 12° は「弾かれた」感が出る最小限。大きくすると滞空時間が伸びて
-  横方向の適正範囲が狭まり、3歳児にはシビアになる。
+  `FLICK_ZONE_PX = 90` は `GROOVE_GAP = 120` より狭くしてある(検算 §12-6)。
+- 仰角 28°。レバーが下からはたき上げるイメージで、放物線がはっきり見える。
+  旧仕様の 12° は弾道がほぼ直線で「弾かれた」感が乏しかった。
 
-### 4.4 `airborne` の更新
+### 4.4 `airborne` の更新 — サブステップ+全板の実体衝突
+
+**1フレームを、1サブステップの移動量が `MAX_SUBSTEP_MOVE = 6` px を
+超えないように分割して積分する**(上限 12 分割)。これが高速時のすり抜けを防ぐ。
 
 ```ts
-prevY = pos.y
-vel.y += GRAVITY * dt
-pos   += vel * dt
+speed = |vel|(重力込み)
+steps = clamp(ceil(speed * dt / MAX_SUBSTEP_MOVE), 1, 12)
+h     = dt / steps
 
-// 壁: 跳ね返らせず、横速度を殺して滑り落とす
-if (pos.x - COIN_R < BOARD_LEFT)  { pos.x = BOARD_LEFT + COIN_R;  vel.x = 0 }
-if (pos.x + COIN_R > BOARD_RIGHT) { pos.x = BOARD_RIGHT - COIN_R; vel.x = 0 }
+for s in 0..steps-1:
+  prev = pos
+  vel.y += GRAVITY * h
+  pos   += vel * h
 
-// 着地面は「1段下の板」だけ。発射した段は飛び越える途中なので判定しない
-targetIndex = rowIndex + 1
-isPocket    = targetIndex >= ROW_COUNT
-planeY = isPocket ? pocket.y - COIN_R : plankCoinY(rows[targetIndex], pos.x)
+  // 壁: 跳ね返らせず、横速度を殺して滑り落とす
+  if (pos.x - COIN_R < BOARD_LEFT)  { pos.x = BOARD_LEFT + COIN_R;  if(vel.x<0) vel.x = 0 }
+  if (pos.x + COIN_R > BOARD_RIGHT) { pos.x = BOARD_RIGHT - COIN_R; if(vel.x>0) vel.x = 0 }
 
-if (vel.y <= 0 || prevY > planeY || pos.y < planeY) return   // まだ通過していない
+  for row of rows:                      // ★ 全ての板と衝突する
+    // 上面への着地。下向きに面を横切った瞬間だけ乗せる(跳ねない)
+    if vel.y >= 0 && onPlank(row, pos.x)
+       && prev.y <= plankCoinY(row, prev.x) + 1
+       && pos.y  >= plankCoinY(row, pos.x):
+         → state='onPlank', rowIndex=row.index, x=pos.x, vx=vel.x, landedOnRow=row.index
+    // 端面(左端・右端)との衝突
+    collidePlankEnd(row, row.left,  -1)
+    collidePlankEnd(row, row.right, +1)
 
-success = isPocket ? inWinPocket(pocket, pos.x) : onPlank(rows[targetIndex], pos.x)
-if (success && isPocket)  → state = 'win',   reachedWin = true
-if (success && !isPocket) → state = 'onPlank', rowIndex = targetIndex,
-                             x = pos.x, vx = vel.x (横の勢いだけ引き継ぐ。跳ねない)
-if (!success)             → state = 'falling', hole = findHole(targetIndex, pos.x)
+  // あたりの口
+  if isPocket && vel.y > 0 && pos.y >= pocket.y - COIN_R && inWinPocket(pocket, pos.x)
+     → state='win', reachedWin=true
+
+  // 落下確定
+  if pos.y > captureY:                  // 1段下の板面 + CAPTURE_BELOW
+     → state='falling', hole=findHole(targetIndex, pos.x), fallFrom=pos
 ```
 
-**壁で跳ね返らせないことが重要。** 跳ね返らせると強く弾いたコインが壁で戻って板に乗り、
-「強すぎ = 失敗」というルールが成立しなくなる。
+`collidePlankEnd(row, endX, outward)` は、コインの円と板の端の**縦の線分**
+(上面から底面まで。高い端は返しのぶん上へ伸びる)との最近接距離で判定する。
+
+```ts
+top    = plankSurfaceY(row, endX) - (高い端なら PLANK_LIP : 0)
+bottom = plankSurfaceY(row, endX) + PLANK_THICK
+if (pos.y < top - COIN_R*0.35) return false      // 十分上 → 上面判定に任せる
+nearY = clamp(pos.y, top, bottom)
+if ((pos.x-endX)² + (pos.y-nearY)² >= COIN_R²) return false
+if ((pos.x-endX) * outward < 0) return false     // 外側から当たったときだけ
+pos.x = endX + outward * push                    // めり込みぶん水平に押し出す
+if (vel.x * outward < 0) vel.x = 0               // 跳ね返さず、勢いだけ殺す
+```
+
+**跳ね返らせないことが重要。** 壁でも板の端でも跳ね返らせると、
+強く弾いたコインが戻って板に乗り、「強すぎ = 失敗」が成立しなくなる。
+
+`findHole` は落下 x を含む穴を返す。どの穴の範囲にも入らなければ、
+同じ段で最も近い穴を返す(演出の落下先が null にならないようにする)。
 
 ### 4.5 `falling` / `win`
 
 どちらも `timer += dt` するだけの演出状態。物理は止まる。
 
-- `falling`: `FALL_ANIM = 1.0` 秒。穴の中心へ吸い込まれながら縮小・フェード。
+- `falling`: `FALL_ANIM = 1.0` 秒。
+  `0..0.3` 穴の口まで滑る → `0.3..0.8` 沈みながら縮小 → `0.8..` フェード。
+  沈み始めたら**穴の手前側のリムをコインの上に重ねて描く**(`drawRoundHoleFront`)。
+  これで「穴の中へ入っていく」ように見える。
 - `win`: `WIN_ANIM = 1.5` 秒。あたりの口の中で小さく跳ねる。
 
 ---
@@ -346,39 +449,44 @@ if (!success)             → state = 'falling', hole = findHole(targetIndex, po
 
 ```ts
 DIFFICULTIES = {
-  easy:   { id: 'easy',   label: 'やさしい', plankWidth: 330 },
-  normal: { id: 'normal', label: 'ふつう',   plankWidth: 160 },
+  easy:   { id: 'easy',   label: 'やさしい', plankWidth: 190 },
+  normal: { id: 'normal', label: 'ふつう',   plankWidth: 110 },
 }
 ```
 
 **難易度差は板の幅だけ。** 弾き力の範囲・ストローク・重力・段間距離はすべて共通。
+溝の位置(420 / 300)は板幅に依存しないので、飛距離も落差も難易度で動かない。
 難易度を切り替えても指の感覚が変わらないので3歳児が混乱しない。
 
 ### 5.2 実測された成功域(`npm run verify`)
 
 | 遷移 | やさしい | ふつう |
 |---|---|---|
-| 段1 → 段2 | 85%(pull 0.17〜0.98) | 43%(pull 0.17〜0.58) |
-| 段2 → 段3 | 85% | 43% |
-| 段3 → 段4 | 85% | 43% |
-| 段4 → 段5 | 85% | 43% |
-| 段5 → あたりの口 | 89%(pull 0.14〜0.98) | 47%(pull 0.14〜0.58) |
+| 段1 → 段2 | 71%(pull 0.12〜0.79) | 45%(pull 0.12〜0.55) |
+| 段2 → 段3 | 71% | 45% |
+| 段3 → 段4 | 71% | 45% |
+| 段4 → 段5 | 71% | 45% |
+| 段5 → あたりの口 | 65%(pull 0.12〜0.74) | 40%(pull 0.12〜0.50) |
 
 - すべて**連続した1区間**。飛び地はない。
 - すべての遷移で**弱すぎ・強すぎの両方の失敗が存在する**。
-- やさしい (85%) > ふつう (43%)。
+- やさしい (最小 65%) > ふつう (最小 40%)。
+- あたりの口だけ他よりわずかに狭いのは、`inWinPocket` が左右 4px 内側に
+  絞っているため(§3.4)。合格基準は満たしている。
 
 ### 5.3 チューニングの経緯(再発防止のため記録)
 
 | 試した値 | 結果 | 判断 |
 |---|---|---|
-| `P_MAX = 1400` | やさしい 52%。ストローク上端が丸ごと「強すぎ」 | 却下。1000 に下げた |
-| `plankWidth = 340` | やさしい 87% だが**強すぎ失敗が 0 件**になった | 却下。板が壁に接し、強く弾いても壁で止まって板に戻ってしまう |
-| `plankWidth = 330` | やさしい 85%、両方の失敗あり | **採用** |
-| `plankWidth = 160` | ふつう 43%、両方の失敗あり | **採用** |
+| 旧: 溝は板の「側」、弾く向きは溝と反対 | 弾道が必ず自分の板を通る = **貫通** | 却下。幾何を作り直した(§0.35) |
+| `FLICK_RISE = 12°` | 弾道がほぼ直線で「弾かれた」感が出ない | 却下。28° に上げた |
+| `P_MAX = 1000`(旧値)+ 仰角 28° | 滞空が伸びて上端が丸ごと「強すぎ」 | 却下。800 に下げた |
+| `plankWidth = 190 / 110` | やさしい 65〜71%、ふつう 40〜45%、両方の失敗あり | **採用** |
+| `ROLL_DAMPING = 1.8` | 板が短くなったぶん溝に着くのが遅い | 1.4 に下げてテンポを戻した |
 
-`plankWidth = 340` の違反は、検算スクリプトの
-「弱すぎでも強すぎでも落ちる」チェックが自動で検出した。
+板幅の上限は「奥の穴が消えないこと」で決まる(§3.3)。
+やさしい 190 のとき高い端と壁の隙間は 70px で、`COIN_R * 2 = 56` を上回っている。
+これを割ると強すぎで失敗できなくなり、検算 §12-1 が落とす。
 
 ---
 
@@ -421,24 +529,42 @@ html, body { overscroll-behavior: none; user-select: none; -webkit-user-select: 
 
 ```ts
 pull  = clamp(dy / STROKE_FINGER, 0, 1)
-power = P_MIN + (P_MAX - P_MIN) * pull      // 200 .. 1000 px/s
+power = P_MIN + (P_MAX - P_MIN) * pull      // 250 .. 800 px/s
 if (pull < PULL_DEADZONE = 0.05) → 発射しない(誤タップで空撃ちしない)
 ```
 
-### 6.5 レバー
+### 6.5 レバー(ハンマー)
 
 ```ts
-interface LeverState { swing: number; timer: number }   // swing: -1 タメ / 0 静止 / +1 はたいた頂点
+interface LeverState {
+  swing: number;   // -1..0 タメ / 0 静止 / 0..1 はたき(1 が振り上げの頂点)
+  timer: number;   // はたきアニメの残り
+  flash: number;   // 打撃直後の光 (0..1)
+}
 ```
 
-- 引いている間: `swing = -pull * 0.4`(全段が連動して引き戻る。タメの視覚フィードバック)
-- 発射時 `triggerLevers()`: 全段の `timer = LEVER_SWING_TIME (0.2s)`、
-  `swing = sin(t * π)` ではたきアニメ。
+- 見た目: 板の先端の下にぶら下がるハンマー。軸は溝の真下 `grooveY + PLANK_THICK + 20`。
+- 引いている間: `swing = -pull`(全段が連動して内側へ巻き上がる。タメの視覚フィードバック)
+- 発射時 `triggerLevers()`: 全段の `timer = LEVER_SWING_TIME (0.22s)`、`flash = 1`。
+  `t < 0.35` で一気に振り上げ、その後戻る。振り上げ中は扇形の残像を描く。
 - レバーは**見た目だけ**。当たり判定は `canFlick` / `flickCoin` が持つ。
 
-### 6.6 クールダウン
+### 6.6 発射のタイミング — レバーが当たってから飛ぶ
 
-発射後 `FLICK_COOLDOWN = 0.3` 秒は再度掴めない。表示はしない。
+`pointerup` の瞬間にコインが飛ぶと、レバーが振り上がる前にコインが消えて
+「はたかれた」ように見えない。そこで発射を `LEVER_HIT_DELAY = 0.06` 秒だけ遅らせる。
+
+```
+pointerup → triggerLevers() ですぐレバーが動き出す
+          → pendingPower に power を積む
+0.06s 後  → flickCoin(power)。同時に打撃点に星を撒く
+```
+
+`beginEnding()` は `pendingPower` を破棄する(あきらめた直後に飛ばないように)。
+
+### 6.7 クールダウン
+
+発射後 `FLICK_COOLDOWN = 0.35` 秒は再度掴めない。表示はしない。
 
 ---
 
@@ -539,18 +665,18 @@ phase === 'play'
 ### 8.1 レイヤー順序(ゲーム画面)
 
 ```
-1  drawSky
-2  drawSunAndClouds
-3  drawBoardBackground        盤面の地と斜めのハイライト
-4  drawSideAnimals            板より先に描くので腰から下が隠れる
-5  drawHole × n
-6  drawEntryChute             投入口から段1へのシュート
+1  drawCabinetBase            画面全体の赤いキャビネット+金の帯
+2  drawBoardFace              ガラス窓の中の化粧板(おひさま・雲・草・コース案内の矢印)
+3  drawEntryChute             投入口から段1へのシュート
+4  drawRoundHole × n          丸い落とし穴
+5  drawWinPocket              あたりの口+旗
+6  drawSideAnimals            板より先に描くので腰から下が隠れる
 7  drawPlank × 5
-8  drawWinPocket
-9  drawLever × 5
-10 drawBoardFrame
-11 drawCabinet                盤面より下の赤い筐体+あたりの受け皿
-12 コイン(状態別)
+8  drawLever × 5
+9  コイン(状態別)+ drawRoundHoleFront(沈むとき手前のリムを重ねる)
+10 particles                  着地の土煙・打撃の星・あたりの紙吹雪
+11 drawBoardFrame             窓枠+ネジ+ガラスの反射。中身を全部覆う
+12 drawCabinetLower           プランジャー帯の装飾+あたりの受け皿
 13 drawCoinSlot               右上の投入口
 14 drawInsertCoin             insert フェーズのみ
 15 drawPlunger
@@ -558,34 +684,58 @@ phase === 'play'
 17 drawHandGuide              条件を満たすときのみ
 ```
 
+**順序の要点**: コインとパーティクルは窓枠(11)より先に描く。
+こうすると盤面からはみ出したものが枠に隠れ、ガラスの内側に収まって見える。
+
 ### 8.2 カラーパレット
 
 ```ts
 sky '#8FD3F4'  skyTop '#BDE9FF'  sun '#FFE066'  cloud '#FFFFFF'
-mountain '#8CC63F'  mountainHi '#B5E061'  mountainSh '#5FA32A'
-plankTop '#D9A05B'  plankSide '#A9713A'  plankEdge '#6B4423'
+// 筐体(実機の赤いキャビネット)
+cabinet '#D8452F'  cabinetDark '#A93223'  cabinetTrim '#F2B33D'  cabinetTrimDark '#C98F1E'
+// 盤面の化粧板
+boardFace '#FFF3CF'  boardFaceDeep '#F5DE9E'
+// レール
+plankTop '#F5B04C'  plankSide '#C97F23'  plankEdge '#6B4423'
 lever '#E8503A'  leverDark '#B23324'
-hole '#3A2A18'  holeRim '#241708'
+// 丸穴(こげ茶の穴+オレンジのリム)
+hole '#2A1B0C'  holePit '#120B04'  holeRing '#FF7A2F'  holeRingDark '#D65A17'
 coinRim '#F5C242'  coinFace '#FFF3D0'
-pocket '#F2E9D8'  flagRed '#E8503A'
-ink '#3B2A1A'  panel '#FFF8EC'  panelEdge '#3B2A1A'
-accent '#FF8A3D'  disabled '#C9C2B6'
-筐体 '#D64B3A'(赤) / '#C9A227'(金の縁)
+pocket '#F5C242'  pocketDark '#D9A227'  flagRed '#E8503A'
+ink '#3B2A1A'  panel '#FFF8EC'  accent '#FF8A3D'  disabled '#C9C2B6'
 ```
 
 `LINE_W = 4`。3歳児の視認性のため輪郭線を細くしない。
 
-### 8.3 描画関数一覧(`render/drawings.ts`)
+### 8.3 丸穴の描き方
+
+奥行きが出るように、1つの穴を**手前と奥に分けて**描く。
+
+| 関数 | 内容 | 描くタイミング |
+|---|---|---|
+| `drawRoundHole` | 影 → オレンジのリム(下半分を暗く)→ 穴の中(放射グラデーション)→ 奥の内壁 | コインより**前** |
+| `drawRoundHoleFront` | 手前半分のリング+手前の内壁 | 沈むコインより**後** |
+
+コインが穴に入る瞬間に `drawRoundHoleFront` を重ねることで、
+コインの下半分がリムに隠れて「穴の中へ落ちていく」ように見える。
+
+### 8.4 描画関数一覧(`render/drawings.ts`)
 
 ```
-背景    drawSky, drawSunAndClouds, drawBoardBackground
-盤面    drawCabinet, drawBoardFrame, drawHole, drawPlank, drawLever, drawWinPocket
-コイン  drawCoin, drawCoinSlot, entryChute, drawEntryChute, drawInsertCoin
+空      drawSky, drawSunAndClouds                (タイトル / リザルト用)
+筐体    drawCabinetBase, drawCabinetLower, drawBoardFrame, drawBoardFace
+盤面    drawRoundHole, drawRoundHoleFront, drawPlank, drawLever, drawWinPocket
+コイン  drawCoin, drawCoinShadow, drawCoinSlot, entryChute, drawEntryChute, drawInsertCoin
 操作    drawPlunger, drawHandGuide, drawGiveUpButton, drawButton
 収集    drawStamp, drawStampBook
 画面    drawTitleLogo, drawResultSteps
 装飾    drawSideAnimals
 ```
+
+- `drawCoin` は `squash` 引数で着地のつぶれを表現する
+  (`LAND_SQUASH_TIME = 0.14` 秒、`sin` で往復)。
+- `drawCoinShadow` は空中のコインの真下、着地面に落ちる影。
+  高さに応じて濃さと大きさが変わり、どこに落ちるかの手がかりになる。
 
 - どうぶつの顔は `render/animals.ts`(`drawAnimalFace`, `drawCheerAnimal`)。
 - 図形・文字の下請けは `render/shapes.ts`(`roundRect`, `circle`, `ellipse`, `polygon`,
@@ -593,10 +743,17 @@ accent '#FF8A3D'  disabled '#C9C2B6'
 - **外部素材は一切使わない。** 画像・音声・フォント・CDN への参照ゼロ。
   ビルド後のバンドルを grep して確認すること。
 
-### 8.4 パーティクル(紙吹雪)
+### 8.5 パーティクル
 
-`render/particles.ts`。あたりのリザルトでのみ使用。画面上端から降らせ、
-0.4 秒ごとに 20 個ずつ追加する。重力と回転を持つだけの単純なもの。
+`render/particles.ts`。3種類を1つのシステムで扱う。上限 300 個。
+
+| 種類 | 用途 | 挙動 |
+|---|---|---|
+| `confetti` | あたり(ゲーム画面・リザルト両方) | 重力+左右の揺れ+回転。画面外で消える |
+| `puff` | 着地の土煙、穴に落ちた瞬間 | 左右に広がりながら膨らんでフェード。0.35〜0.55秒 |
+| `star` | レバーの打撃、板の端にぶつかった瞬間 | 放射状に飛んで落ちる。0.3〜0.45秒 |
+
+リザルトのあたりでは 0.4 秒ごとに 20 個の紙吹雪を追加し続ける。
 
 ---
 
@@ -627,14 +784,18 @@ buildRows(d: DifficultyConfig): Row[]
 buildWinPocket(d: DifficultyConfig): WinPocket
 buildHoles(d: DifficultyConfig): Hole[]
 
-notchPos(row: Row): Vec2            // 溝でのコイン中心
-flickDirX(row: Row): number         // 弾き出す向き(溝が右なら -1)
-downhillDirX(row: Row): number      // 板が下る向き(溝が右なら +1)
+groovePos(row: Row): Vec2           // 溝(先端)でのコイン中心
+flickDirX(row: Row): number         // 弾き出す向き(grooveSide==='left' なら -1)
+downhillDirX(row: Row): number      // 板が下る向き。flickDirX と同じ
+highEndX(row: Row): number          // 板の高い端の x(溝の反対側)
 plankSurfaceY(row: Row, x: number): number
 plankCoinY(row: Row, x: number): number
 onPlank(row: Row, x: number): boolean
 inWinPocket(pocket: WinPocket, x: number): boolean
 ```
+
+> `flickDirX === downhillDirX` は偶然ではなく設計そのもの。
+> 溝は板の先端にあり、コインはそこへ転がり降りて、そのまま先へ弾き出される。
 
 ### 10.2 `game/coin.ts`
 
@@ -650,6 +811,7 @@ interface StepResult {
   landedOnRow: number | null;
   fellInHole: Hole | null;
   reachedWin: boolean;
+  bonk: Vec2 | null;      // 板の端にぶつかった位置(星の演出用)
 }
 ```
 
@@ -687,18 +849,21 @@ COIN_R = 28
 // 盤面
 BOARD_LEFT = 40          BOARD_RIGHT = 680
 BOARD_TOP  = 40          BOARD_BOTTOM = 994      // 画面の 74%
+BOARD_CENTER_X = 360
 ROW_COUNT  = 5           ROW_GAP = 145           ROW_TOP_Y = 210
-PLANK_DROP = 22          NEAR_GAP = 120
-BOARD_CENTER_X = 360     notchOffset(w) = (NEAR_GAP + w) / 2
+GROOVE_GAP = 120         GROOVE_EVEN_X = 420     GROOVE_ODD_X = 300
+PLANK_DROP = 20          PLANK_THICK = 20        PLANK_LIP = 12
+CAPTURE_BELOW = 14
 
 // 物理
-GRAVITY = 2200           ROLL_DAMPING = 1.6
+GRAVITY = 2200           ROLL_DAMPING = 1.4
 FIXED_DT = 1/60          MAX_FRAME_TIME = 0.25
+MAX_SUBSTEP_MOVE = 6     // 空中の1サブステップの最大移動量(貫通防止)
 
 // 弾き
-P_MIN = 200              P_MAX = 1000
-FLICK_RISE_DEG = 12      FLICK_ZONE_PX = 90
-FLICK_COOLDOWN = 0.3     LEVER_SWING_TIME = 0.2
+P_MIN = 250              P_MAX = 800
+FLICK_RISE_DEG = 28      FLICK_ZONE_PX = 90
+FLICK_COOLDOWN = 0.35    LEVER_SWING_TIME = 0.22   LEVER_HIT_DELAY = 0.06
 
 // プランジャー
 KNOB_REST = {x:560, y:1040}   KNOB_R = 46
@@ -714,11 +879,12 @@ BUTTON_PADDING = 20
 
 // 演出
 INSERT_ANIM = 1.4   FALL_ANIM = 1.0   WIN_ANIM = 1.5   STAMP_ANIM = 0.6
+LAND_SQUASH_TIME = 0.14
 COIN_SLOT_CENTER = {x:618, y:96}     COIN_SLOT_SIZE = {w:118, h:84}
 
 // 難易度
-easy:   plankWidth 330
-normal: plankWidth 160
+easy:   plankWidth 190
+normal: plankWidth 110
 
 LINE_W = 4
 ANIMALS = [usagi, kuma, panda, risu, neko, inu, zou, kirin, pengin, raion]
@@ -735,27 +901,39 @@ ANIMALS = [usagi, kuma, panda, risu, neko, inu, zou, kirin, pengin, raion]
 
 | # | 検査内容 |
 |---|---|
-| 1 | 段とあたりの口の座標が盤面 (40..680, ..994) に収まっている |
-| 2 | 5つの遷移の「横に飛ぶ距離」と「落差」がすべて同一。手前の穴が `COIN_R` より広い |
+| 1 | 段とあたりの口の座標が盤面 (40..680, ..994) に収まっている。<br>**各段の高い端と壁の間に `COIN_R * 2` 以上の隙間がある**(奥の穴が消えていない) |
+| 2 | 5つの遷移の「横に飛ぶ距離」と「落差」がすべて同一。間の穴が `COIN_R` より広い |
 | 3 | 各遷移の成功域を pull 0.05〜1.00 を 0.005 刻みで実シミュレーションして測る<br>・成功域が**連続**している(飛び地がない)<br>・**弱すぎでも強すぎでも落ちる**(片側しか失敗しないなら板が壁に接している)<br>・やさしい 60〜100%、ふつう 30〜50%、やさしい > ふつう |
 | 4 | 投入後に放置しても落ちない。放置すると溝で止まって弾ける状態になる |
 | 5 | どの `power` でもコインが盤面外に出ない。座標が NaN/Infinity にならない |
-| 6 | プランジャー帯 ≤ 25%、盤面とノブが重ならない、指のストロークが画面内、<br>引ききってもノブが画面内、弾きゾーン < 手前の穴の幅 |
+| 6 | プランジャー帯 ≤ 25%、盤面とノブが重ならない、指のストロークが画面内、<br>引ききってもノブが画面内、弾きゾーン < 間の穴の幅 |
+| 7 | **板を貫通しないこと(全パワー掃引)**。全段 × `P_MIN..P_MAX` を 10 刻みで飛ばし、<br>飛行中の全サブフレームでコインの円が板の実体に食い込む深さを測る。**4px 以下**であること |
 
-### 12.2 `npm test`(Vitest、70 テスト)
+§7 は発注者からの「棒を貫通する」という不具合報告(§0.35)の再発防止。
+現在の実測値は**両難易度とも 0.0px**。
 
-- `src/game/coin.test.ts`(37): 幾何・弾き・転がり・成功域スキャン・頑健性
+### 12.2 `npm test`(Vitest、77 テスト)
+
+- `src/game/coin.test.ts`(44): 幾何・弾き・転がり・成功域スキャン・**貫通しないこと**・頑健性
+  - 「弾く向きは板から離れる向き」を溝の前後で `onPlank` を見て直接テストする
+  - 全パワー掃引でのめり込み測定(検算 §7 と同じ判定)
+  - 板の先端に横から高速で打ち込んで、止まって落ちる(すり抜けない)ことをテストする
 - `src/game/plunger.test.ts`(19): 掴み判定、`pull` の境界、デッドゾーン、クールダウン、`pointercancel`
 - `src/save.test.ts`(14): 保存・読込・不正値の sanitize・localStorage 例外時のフォールバック
 
-### 12.3 ブラウザでの通しプレイ(Playwright, Pixel 7)
+### 12.3 ブラウザでの通しプレイ(Playwright + Chromium, 450×800)
 
-- タイトル → 投入 → 5段降りる → あたりの口 → リザルト(スタンプ獲得)
-- 弱すぎ(pull 0.10)で手前の穴に落ちる
-- 強すぎ(pull 1.00)で奥の穴に落ちる
-- あきらめる長押し1秒でリザルトへ
-- 未操作2秒で操作ガイドが出る / プランジャーを引くと全レバーが連動する
-- `pageerror` / `console.error` が1件も出ないこと
+実際に確認した内容:
+
+- タイトル → やさしい → 投入アニメ → 溝で停止
+- pull 0.42 を5回繰り返して5段降り、あたりの口に入る → 紙吹雪 →「やったね!」+ スタンプ獲得
+- pull 0.07(弱すぎ)で**間の穴**に落ち、リムに隠れながら沈む →「おしい!」
+- pull 1.00(強すぎ)で**奥の穴**(板の端のすぐ先)に落ちる
+- スタンプが localStorage に残り、リロード後のタイトルに表示される
+- `pageerror` が1件も出ないこと
+
+> リモート実行環境では `/opt/pw-browsers/chromium` を `executablePath` に
+> 指定して起動する(`npx playwright install` は不要)。
 
 ---
 
@@ -799,7 +977,11 @@ build: { modulePreload: false }  // バンドルから fetch() を無くす
 1. **3歳児が泣かないか。** 迷ったら易しい方・優しい方を選ぶ。
 2. **`npm run verify` と `npm test` を通す。** 定数をいじったら必ず両方走らせる。
    「遊べるかどうか」は目視ではなく検算で担保する。
-3. **跳ね返らせない。** 壁でも板でも。跳ね返りは *強すぎ = 失敗* を壊す。
-4. **`src/game/` に Canvas / DOM を持ち込まない。**
-5. **外部素材を足さない。** 画像・音・フォント・CDN すべて禁止。
-6. これら以外の仕様変更は発注者確認なしに行わない。
+3. **弾く向きは必ず板から離れる向き。** 逆走させると貫通が構造的に発生する(§0.35)。
+   `flickDirX` と `downhillDirX` が一致していることがその不変条件。
+4. **跳ね返らせない。** 壁でも板の端でも。跳ね返りは *強すぎ = 失敗* を壊す。
+5. **板の幅を広げるときは奥の穴を潰していないか確認する。**
+   高い端と壁の隙間が `COIN_R * 2` を切ると「強すぎ」で失敗できなくなる。
+6. **`src/game/` に Canvas / DOM を持ち込まない。**
+7. **外部素材を足さない。** 画像・音・フォント・CDN すべて禁止。
+8. これら以外の仕様変更は発注者確認なしに行わない。
