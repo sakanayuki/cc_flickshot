@@ -1,23 +1,25 @@
 /**
- * 盤面の幾何。左右の端を行き来するレール(板)と、丸い落とし穴と、あたりの口。
+ * レーンの幾何。実機の写真に引かれた青い線そのものを、1 本の折れ線として持つ。
  *
- * レイアウト(上から見て。実機の写真と同じ並び):
+ * レーンの形(上から下へ):
  *
- *                                      [投入口]
- *   段1:            ○ ○      ====レール====●|  ← 先端は右端。左へ弾く
- *   段2:  |●====レール====      ○ ○           ← 先端は左端。右へ弾く
- *   段3:            ○ ○      ====レール====●|
- *   段4:  |●====レール====      ○ ○
- *   段5:            ○ ○      ====レール====●|
- *   口 :  |==あたりの口==
+ *      [投入口]
+ *   走路0:  ←──────────────●   ← 右上から入って左へ走る
+ *          ╭╯                    ● = 止まり木(レバー)。走路の端 = 壁ぎわ
+ *   走路1:  ○○──────────────→●   ○ = 穴(アウト)。U ターンを出てすぐ
+ *                            ╰╮
+ *   走路2:  ●←──────────────○○
+ *          ╭╯
+ *   走路3:  ○○──────────────→●
+ *                            ╰╮
+ *   走路4:  ●←──────────────○○
+ *          ╭╯
+ *   走路5:  ○○──────────[あたり]  → その先にも穴(乗り越えたとき用)
  *
- *   ● = 溝(コインが止まる先端)。すぐ横の壁にレバーが付く
- *   ○ = 丸い落とし穴(アウト)
- *   |  = 先端と壁の隙間(TIP_INSET)。ここも丸い落とし穴になっている
- *
- * コインは先端で止まり、**盤面の内側へ**弾かれる。自分のレールを飛び越して
- * 中央の穴の上を飛び、反対側の端にある 1 段下のレールに着地する。
- * 弱すぎれば中央の穴、強すぎれば飛び越した先の壁ぎわの穴に落ちる。
+ * コインはこの折れ線の上を、経路に沿った距離 `s` だけで動く。
+ * 止まり木から弾かれる → U ターンを回る → 穴を渡る → 次の止まり木で止まる、
+ * が 1 回ぶんの操作。どの回も「U ターン + 穴 + 助走」の同じ並びを通るので、
+ * 遊びの条件は最初から最後まで完全に同一になる。
  *
  * このモジュールは Canvas も DOM も参照しない。
  */
@@ -26,208 +28,275 @@ import {
   BOARD_LEFT,
   BOARD_RIGHT,
   COIN_R,
-  PLANK_DROP,
   ROW_COUNT,
   ROW_GAP,
   ROW_TOP_Y,
-  TIP_LEFT_X,
-  TIP_RIGHT_X,
+  RUN_COUNT,
+  RUN_DROP,
+  RUN_LEFT_X,
+  RUN_RIGHT_X,
   type DifficultyConfig,
-  type GrooveSide,
-  type Row,
+  type RunDir,
   type Vec2,
-  type WinPocket,
 } from '../config.ts';
 
-/** 段 index の先端(溝)が左右どちらの端に来るか。偶数段=右端、奇数段=左端 */
-function sideOf(index: number): GrooveSide {
-  return index % 2 === 0 ? 'right' : 'left';
+/** レーンの直線部分 1 本。見た目の装飾と止まり木の配置に使う */
+export interface Run {
+  index: number;
+  dir: RunDir;
+  from: Vec2;
+  to: Vec2;
+  /** 経路上での開始・終了距離 */
+  startS: number;
+  endS: number;
 }
 
-/**
- * 段のレールを作る。
- *
- * 偶数段(index 0,2,4)は先端が右端(x=TIP_RIGHT_X)でレールは左へ伸び、左へ弾く。
- * 奇数段(index 1,3)は先端が左端(x=TIP_LEFT_X)でレールは右へ伸び、右へ弾く。
- * どの遷移も「自分のレールを飛び越し、中央の穴を越えて、反対側の端の
- * レールに乗る」で同一条件になる。
- */
-export function buildRows(d: DifficultyConfig): Row[] {
-  const w = d.plankWidth;
-  return Array.from({ length: ROW_COUNT }, (_, i): Row => {
-    const side = sideOf(i);
-    const [left, right] =
-      side === 'right' ? [TIP_RIGHT_X - w, TIP_RIGHT_X] : [TIP_LEFT_X, TIP_LEFT_X + w];
-    const grooveY = ROW_TOP_Y + i * ROW_GAP;
-    return { index: i, left, right, grooveSide: side, grooveY, highY: grooveY - PLANK_DROP };
-  });
+/** 止まり木(レバー)。ここでコインが止まり、ここから弾く */
+export interface Stop {
+  index: number;
+  /** 経路上の距離 */
+  s: number;
+  pos: Vec2;
+  /** どちらの壁ぎわか */
+  side: RunDir;
 }
 
-/**
- * あたりの口。最下段からの 1 回ぶんの遷移がそのまま「あがり」になるよう、
- * 位置も幅も 1 段ぶん下のレールとまったく同じに置く。
- */
-export function buildWinPocket(d: DifficultyConfig): WinPocket {
-  const w = d.plankWidth;
-  const side = sideOf(ROW_COUNT);
-  const [left, right] =
-    side === 'right' ? [TIP_RIGHT_X - w, TIP_RIGHT_X] : [TIP_LEFT_X, TIP_LEFT_X + w];
-  return { left, right, y: ROW_TOP_Y + ROW_COUNT * ROW_GAP };
-}
-
-// ---------------------------------------------------------------- 板の上の幾何
-
-/** 溝(コインが止まってレバーにもたれる位置)。コインの中心が来る位置 */
-export function groovePos(row: Row): Vec2 {
-  const x = row.grooveSide === 'left' ? row.left : row.right;
-  return { x, y: row.grooveY - COIN_R };
-}
-
-/**
- * 弾き出す向き。先端は壁ぎわにあるので、弾く向きはつねに盤面の内側
- * (= 自分のレールを飛び越す向き)。
- */
-export function flickDirX(row: Row): number {
-  return row.grooveSide === 'left' ? 1 : -1;
-}
-
-/** 板が下り坂になる向き(先端へ向かう向き)。弾く向きとは逆 */
-export function downhillDirX(row: Row): number {
-  return -flickDirX(row);
-}
-
-/** 板の高い端の x(先端の反対側 = 盤面の内側の端) */
-export function highEndX(row: Row): number {
-  return row.grooveSide === 'left' ? row.right : row.left;
-}
-
-/** 板の表面の y。x が板の範囲外でも直線を延長して返す */
-export function plankSurfaceY(row: Row, x: number): number {
-  const u = (x - row.left) / (row.right - row.left);
-  // 溝側の端が低い(grooveY)、反対の端が高い(highY)
-  return row.grooveSide === 'left'
-    ? row.grooveY + (row.highY - row.grooveY) * u
-    : row.highY + (row.grooveY - row.highY) * u;
-}
-
-/** コインの中心がこの x で板に乗っているときの y */
-export function plankCoinY(row: Row, x: number): number {
-  return plankSurfaceY(row, x) - COIN_R;
-}
-
-/** x が板の上か。コインの中心で判定する */
-export function onPlank(row: Row, x: number): boolean {
-  return x >= row.left && x <= row.right;
-}
-
-/** あたりの口の範囲に入っているか */
-export function inWinPocket(pocket: WinPocket, x: number): boolean {
-  return x >= pocket.left + 4 && x <= pocket.right - 4;
-}
-
-/**
- * 中央の穴(手前の穴)の幅。
- * 自分のレールの高い端から、着地するレールの高い端までの距離。
- */
-export function nearGapWidth(d: DifficultyConfig): number {
-  const rows = buildRows(d);
-  return Math.abs(highEndX(rows[0]!) - highEndX(rows[1]!));
-}
-
-// ---------------------------------------------------------------- 穴
-
-/** 丸い落とし穴。着地に失敗するとここへ落ちる */
+/** 丸い落とし穴。勢いが足りないままここへ来ると落ちる */
 export interface Hole {
-  /** どの段の高さにある穴か(1..ROW_COUNT)。ROW_COUNT はあたりの口の高さ */
-  rowIndex: number;
-  /** 落下として扱う x 範囲(板でも口でもない区間) */
-  left: number;
-  right: number;
-  /** 落下レベルの y(その段の板面の高さ) */
-  y: number;
-  /** 弾いた先端から見て手前(弱すぎ)側か、飛び越した先(強すぎ)側か */
-  kind: 'near' | 'far';
-  /** 穴の見た目の中心と半径 */
+  index: number;
+  /** 経路上の区間 [s0, s1] */
+  s0: number;
+  s1: number;
+  /** 見た目の丸。区間を隙間なく埋める */
+  circles: Array<{ cx: number; cy: number; r: number }>;
+  /** 演出でコインが吸い込まれる先 */
   cx: number;
   cy: number;
   rx: number;
   ry: number;
 }
 
-/**
- * 中央の穴は実機の写真と同じく「丸い穴が並んでいる」見た目にする。
- * 落ちる範囲は隙間まるごとなので、丸を並べて隙間を隙間なく埋める。
- * 1 つあたりがこの幅に近くなるよう個数を決めると、どの難易度でも丸く見える。
- */
-const NEAR_HOLE_PITCH = 72;
+/** 盤面のレーン一式 */
+export interface Lane {
+  /** 折れ線の頂点 */
+  pts: Vec2[];
+  /** pts[i] までの累積距離。pts と同じ長さ */
+  cum: number[];
+  /** 経路の全長 */
+  length: number;
+  runs: Run[];
+  stops: Stop[];
+  holes: Hole[];
+  /** あたりの口の経路上の位置 */
+  goalS: number;
+  goalPos: Vec2;
+}
+
+/** U ターン 1 つを折れ線に刻む分割数 */
+const TURN_STEPS = 14;
+/** 穴を描く丸の直径のめやす。区間をこれに近い個数で割る */
+const HOLE_CIRCLE_PITCH = 74;
+
+function dist(a: Vec2, b: Vec2): number {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
 
 /**
- * すべての穴を作る。
+ * レーンの折れ線を作る。
  *
- * 手前の穴: 自分のレールの高い端と、着地するレールの高い端の間。
- *           弱すぎたコインが落ちる。盤面の中央にあり、全遷移で共通。
- * 奥の穴  : 着地するレールの先端と、その先の壁の間(TIP_INSET)。
- *           強すぎて飛び越しすぎたコインが落ちる。
- * 両方が必ず存在する(片方しか無いと片側だけのゲームになる)。
+ * 走路 i は y = ROW_TOP_Y + i * ROW_GAP から RUN_DROP だけ下りながら、
+ * 左右の端(RUN_LEFT_X / RUN_RIGHT_X)を結ぶ。端まで来たら半円の U ターンで
+ * 1 段下の走路の始点へつなぐ。U ターンは壁の側へ膨らむ。
  */
-export function buildHoles(d: DifficultyConfig): Hole[] {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const holes: Hole[] = [];
+function buildPolyline(): { pts: Vec2[]; runs: Run[] } {
+  const pts: Vec2[] = [];
+  const runs: Run[] = [];
 
-  for (let level = 1; level <= ROW_COUNT; level++) {
-    const isPocket = level === ROW_COUNT;
-    const target = isPocket
-      ? { left: pocket.left, right: pocket.right, y: pocket.y }
-      : { left: rows[level]!.left, right: rows[level]!.right, y: rows[level]!.grooveY };
-    const source = rows[level - 1]!;
-    // 1 つ上の段からどちらへ弾かれてくるか
-    const goingLeft = flickDirX(source) < 0;
+  for (let i = 0; i < RUN_COUNT; i++) {
+    // 走路0 は左へ。以降は交互
+    const dir: RunDir = i % 2 === 0 ? 'left' : 'right';
+    const y = ROW_TOP_Y + i * ROW_GAP;
+    const from: Vec2 =
+      dir === 'left' ? { x: RUN_RIGHT_X, y } : { x: RUN_LEFT_X, y };
+    const to: Vec2 =
+      dir === 'left'
+        ? { x: RUN_LEFT_X, y: y + RUN_DROP }
+        : { x: RUN_RIGHT_X, y: y + RUN_DROP };
 
-    // 手前(中央)の穴: 弾いた側のレールの高い端 〜 着地するレールの高い端
-    const near = goingLeft
-      ? { left: target.right, right: source.left }
-      : { left: source.right, right: target.left };
-    // 奥の穴: 着地するレールの先端の先、壁との隙間
-    const far = goingLeft
-      ? { left: BOARD_LEFT, right: target.left }
-      : { left: target.right, right: BOARD_RIGHT };
+    pts.push(from, to);
+    runs.push({ index: i, dir, from, to, startS: 0, endS: 0 });
 
-    // 中央の穴は丸を並べて開口を埋める。写真と同じ見た目になる
-    const span = near.right - near.left;
-    const count = Math.max(2, Math.round(span / NEAR_HOLE_PITCH));
-    const step = span / count;
-    for (let k = 0; k < count; k++) {
-      const l = near.left + step * k;
-      const rx = step / 2;
-      holes.push({
-        rowIndex: level,
-        left: l,
-        right: l + step,
-        y: target.y,
-        kind: 'near',
-        cx: l + rx,
-        cy: target.y + 4,
-        rx,
-        ry: Math.min(30, rx * 0.8),
+    // 最後の走路の先は U ターンせず、まっすぐ少し伸ばして終わる
+    if (i === RUN_COUNT - 1) break;
+
+    // U ターン。to から 1 段下の走路の始点(x は同じ)へ、壁側へ膨らむ半円
+    const nextY = ROW_TOP_Y + (i + 1) * ROW_GAP;
+    const cy = (to.y + nextY) / 2;
+    const r = (nextY - to.y) / 2;
+    const outward = dir === 'left' ? -1 : 1;
+    for (let k = 1; k < TURN_STEPS; k++) {
+      const a = (k / TURN_STEPS) * Math.PI;
+      pts.push({
+        x: to.x + outward * Math.sin(a) * r,
+        y: cy - Math.cos(a) * r,
       });
     }
+  }
 
-    const farHalf = (far.right - far.left) / 2;
-    holes.push({
-      rowIndex: level,
-      left: far.left,
-      right: far.right,
-      y: target.y,
-      kind: 'far',
-      cx: (far.left + far.right) / 2,
-      cy: target.y + 4,
-      rx: farHalf,
-      ry: Math.min(30, farHalf * 0.72),
+  // あたりの口を乗り越えたコインが落ちる先。四分円で下へ逃がす
+  const last = runs[runs.length - 1]!;
+  const outward = last.dir === 'left' ? -1 : 1;
+  const tailR = 56;
+  for (let k = 1; k <= TURN_STEPS / 2; k++) {
+    const a = (k / (TURN_STEPS / 2)) * (Math.PI / 2);
+    pts.push({
+      x: last.to.x + outward * Math.sin(a) * tailR,
+      y: last.to.y + (1 - Math.cos(a)) * tailR,
     });
   }
-  return holes;
+
+  return { pts, runs };
+}
+
+/** 折れ線の累積距離と、走路ごとの s を埋める */
+function measure(pts: Vec2[], runs: Run[]): { cum: number[]; length: number } {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1]! + dist(pts[i - 1]!, pts[i]!));
+  // 走路 i の from / to は折れ線のどこにあるか(from の頂点番号を数える)
+  let vi = 0;
+  for (const run of runs) {
+    run.startS = cum[vi]!;
+    run.endS = cum[vi + 1]!;
+    vi += 2 + (run.index === runs.length - 1 ? 0 : TURN_STEPS - 1);
+  }
+  return { cum, length: cum[cum.length - 1]! };
+}
+
+/**
+ * 盤面のレーン一式を作る。
+ *
+ * 止まり木は走路 0..ROW_COUNT-1 の終端(壁ぎわ)に置く。
+ * 穴は「U ターンを出てすぐ」= 次の走路の始まりに置く。
+ * つまり弾かれたコインは必ず「U ターン → 穴 → 助走 → 止まり木」の順に通る。
+ */
+export function buildLane(d: DifficultyConfig): Lane {
+  const { pts, runs } = buildPolyline();
+  const { cum, length } = measure(pts, runs);
+
+  const at = (s: number): Vec2 => posOnPolyline(pts, cum, s);
+
+  const stops: Stop[] = [];
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const run = runs[i]!;
+    stops.push({ index: i, s: run.endS, pos: run.to, side: run.dir });
+  }
+
+  const holes: Hole[] = [];
+  // 走路 1..RUN_COUNT-1 の頭に 1 つずつ。最後にもう 1 つ、あたりの口の先に置く
+  for (let i = 1; i < RUN_COUNT; i++) {
+    holes.push(makeHole(holes.length, runs[i]!.startS, d.holeSpan, at));
+  }
+  const goalS = runs[RUN_COUNT - 1]!.endS;
+  // 乗り越えたときの受け皿。レーンの残りが短いので入るだけ確保する
+  const tailStart = goalS + 20;
+  holes.push(makeHole(holes.length, tailStart, Math.min(d.holeSpan, length - tailStart), at));
+
+  return { pts, cum, length, runs, stops, holes, goalS, goalPos: at(goalS) };
+}
+
+/** 経路上の区間 [s0, s0+span] を丸で埋めた穴を作る */
+function makeHole(
+  index: number,
+  s0: number,
+  span: number,
+  at: (s: number) => Vec2,
+): Hole {
+  const n = Math.max(1, Math.round(span / HOLE_CIRCLE_PITCH));
+  const step = span / n;
+  const circles = Array.from({ length: n }, (_, k) => {
+    const c = at(s0 + step * (k + 0.5));
+    return { cx: c.x, cy: c.y, r: step / 2 };
+  });
+  const mid = at(s0 + span / 2);
+  return {
+    index,
+    s0,
+    s1: s0 + span,
+    circles,
+    cx: mid.x,
+    cy: mid.y,
+    rx: step / 2,
+    ry: step / 2,
+  };
+}
+
+// ---------------------------------------------------------------- 経路の上の幾何
+
+function posOnPolyline(pts: Vec2[], cum: number[], s: number): Vec2 {
+  const t = Math.max(0, Math.min(cum[cum.length - 1]!, s));
+  // 二分探索で t を含む区間を見つける
+  let lo = 0;
+  let hi = cum.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid]! <= t) lo = mid;
+    else hi = mid;
+  }
+  const seg = cum[hi]! - cum[lo]!;
+  const u = seg > 0 ? (t - cum[lo]!) / seg : 0;
+  return {
+    x: pts[lo]!.x + (pts[hi]!.x - pts[lo]!.x) * u,
+    y: pts[lo]!.y + (pts[hi]!.y - pts[lo]!.y) * u,
+  };
+}
+
+/** 経路上の距離 s の座標 */
+export function posAt(lane: Lane, s: number): Vec2 {
+  return posOnPolyline(lane.pts, lane.cum, s);
+}
+
+/** 経路の進行方向(単位ベクトル) */
+export function dirAt(lane: Lane, s: number): Vec2 {
+  const a = posAt(lane, Math.max(0, s - 4));
+  const b = posAt(lane, Math.min(lane.length, s + 4));
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  return { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+}
+
+/** s が穴の上か。上なら穴を返す */
+export function holeAt(lane: Lane, s: number): Hole | null {
+  for (const h of lane.holes) if (s >= h.s0 && s <= h.s1) return h;
+  return null;
+}
+
+/** s より先にある最初の穴 */
+export function nextHole(lane: Lane, s: number): Hole | null {
+  for (const h of lane.holes) if (h.s1 > s) return h;
+  return null;
+}
+
+/** 穴を渡りきってから止まり木までの助走距離。成功域の広さを決める */
+export function runUpLength(lane: Lane, stopIndex: number): number {
+  const stop = lane.stops[stopIndex]!;
+  // その止まり木の直前にある穴
+  let last: Hole | null = null;
+  for (const h of lane.holes) if (h.s1 <= stop.s) last = h;
+  return last ? stop.s - last.s1 : stop.s;
+}
+
+/** 弾く向き(画面上のどちらへ走り出すか)。止まり木の位置で決まる */
+export function stopFlickDirX(stop: Stop): number {
+  // 左端の止まり木なら、U ターンを回った先は右向きの走路
+  return stop.side === 'left' ? 1 : -1;
 }
 
 export const WALL_LEFT_X = BOARD_LEFT;
 export const WALL_RIGHT_X = BOARD_RIGHT;
+
+/** U ターンが壁へ食い込んでいないか(検算用) */
+export function turnOuterMargin(): number {
+  const r = (ROW_GAP - RUN_DROP) / 2;
+  return RUN_LEFT_X - r - (BOARD_LEFT + COIN_R);
+}
+
+export { RUN_LEFT_X, RUN_RIGHT_X };

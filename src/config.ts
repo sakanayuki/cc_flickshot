@@ -1,23 +1,19 @@
 /**
  * 全チューニング定数と共有型。
  *
- * このゲームは「上から下へ降りる」。コインは右上から入り、レール(板)を
- * 転がり降りて**画面の端の先端**まで来る。先端には壁から生えたレバーがあり、
- * コインはそこにもたれて止まる。プランジャーを離すとレバーがコインを
- * **盤面の内側へ**弾き出し、放物線を描いて反対側の端にある 1 段下のレールへ
- * 飛び移る。弱すぎれば中央の丸穴、強すぎれば飛び越した先(反対側の壁ぎわ)の
- * 丸穴に落ちてコインは没収される。
+ * このゲームは「上から下へ降りる」。盤面には実機の写真の青い線と同じ
+ * **1 本につながったレーン**が引かれている。長い直線を走り、壁で U ターンして
+ * 1 段下の直線へ、を繰り返しながら下りていく。
  *
- * レールは実機の写真と同じく左端・右端・左端…と交互に置かれ、先端(溝)は
- * つねに壁のすぐそば(TIP_INSET)にある。つまり「弾く点」は画面の左右の端で、
- * レバーもその横の壁に付く。
+ * **コインは飛ばない。レーンの上を走る。**
+ * プランジャーを離すと、壁ぎわの止まり木に止まっていたコインが勢いを得て
+ * レーンを走り出し、摩擦で減速しながら next の止まり木を目指す。
+ *   弱すぎ → 途中の穴を渡りきれずに落ちる
+ *   ちょうど → 穴を渡りきり、次の止まり木に受け止められる
+ *   強すぎ → 止まり木を乗り越えてしまい、その先の穴に落ちる
  *
- * 弾く向きは自分のレールの上を逆走する向きになる。そのため
- * **飛び出したコインが自分のレールを飛び越せること**が設計上の必須条件で、
- * FLICK_RISE / P_MIN / plankWidth / PLANK_DROP はその条件
- * (仰角ぶんの上昇 > レールの傾きぶんの上昇、レール全長にわたって)を
- * 満たす組み合わせに調整してある。`npm run verify` の §7 が
- * 全パワー掃引でこれを機械的に確認する。
+ * 物理はレーンに沿った 1 次元(位置 s と速さ v)だけ。放物線も 2 次元の
+ * 当たり判定も無い。レーンの形が変わっても遊びの条件は一切変わらない。
  *
  * このファイルは副作用を持たない葉ノードで、すべてのモジュールから参照される。
  * 数値を変更したら必ず `npm run verify` と `npm test` を実行すること。
@@ -37,35 +33,8 @@ export interface Rect {
   h: number;
 }
 
-/**
- * 溝(コインが止まるレール先端)が板のどちらの端にあるか。
- * 先端はつねに壁ぎわで、レバーはその横の壁に付く。
- * コインは**先端から盤面の内側へ**、自分の板を飛び越す向きに弾き出される。
- */
-export type GrooveSide = 'left' | 'right';
-
-/** 1 段ぶんのレール(板) */
-export interface Row {
-  index: number;
-  /** 板の左端 x */
-  left: number;
-  /** 板の右端 x */
-  right: number;
-  /** 溝(低い側の先端)がどちらの端か */
-  grooveSide: GrooveSide;
-  /** 溝側の板面の y(板はここへ向かって下る) */
-  grooveY: number;
-  /** 反対側(高い端)の板面の y。grooveY - PLANK_DROP */
-  highY: number;
-}
-
-/** 最下段の下にある「あたりの口」。ここに入ればクリア */
-export interface WinPocket {
-  left: number;
-  right: number;
-  /** 受け口の高さ。コイン中心がこの y に達したら判定する */
-  y: number;
-}
+/** 走路(レーンの直線部分)がどちら向きに走るか */
+export type RunDir = 'left' | 'right';
 
 export type DifficultyId = 'easy' | 'normal';
 
@@ -73,11 +42,12 @@ export interface DifficultyConfig {
   id: DifficultyId;
   label: string;
   /**
-   * 板(レール)の長さ。これだけが難易度差。
-   * 長いほど着地できる範囲が広く、強すぎ・弱すぎの許容が大きい。
-   * ただし長すぎると自分のレールを飛び越せなくなるので上限がある(§検算7)。
+   * 穴のレーンに沿った長さ。これだけが難易度差。
+   *
+   * 短いほど渡りきるのに要る勢いが小さく、渡ってから止まり木までの
+   * 助走距離が長くなる = 減速する余地が増えて成功域が広がる。
    */
-  plankWidth: number;
+  holeSpan: number;
 }
 
 // ---------------------------------------------------------------- 画面
@@ -101,73 +71,84 @@ export const BOARD_BOTTOM = 994;
 
 export const BOARD_CENTER_X = (BOARD_LEFT + BOARD_RIGHT) / 2;
 
+/** 止まり木(レバー)の数 = 弾く回数。最後の 1 回であたりの口に入る */
 export const ROW_COUNT = 5;
-/** 溝から溝までの垂直距離。全段共通 */
-export const ROW_GAP = 145;
-/** 1 段目の溝の y */
-export const ROW_TOP_Y = 210;
+/** 走路の本数。1 本目は投入用で、そこから ROW_COUNT 回弾く */
+export const RUN_COUNT = ROW_COUNT + 1;
+/** 走路から走路までの垂直距離 */
+export const ROW_GAP = 138;
+/** 1 本目の走路の y */
+export const ROW_TOP_Y = 190;
 
 /**
- * レールの先端(溝=弾く点)と壁の隙間。
+ * 走路の左端・右端の x。
  *
- * ここが実機との一番の違いだったところ。先端は左右の壁のすぐ内側にあり、
- * レバーはその横の壁に付く。壁との間に残したこの隙間が
- * 「強すぎ」で落ちる**奥の丸穴**になるので、コイン 1 枚(COIN_R*2)より
- * 広くなければならない(検算 §1)。
+ * 走路の端は壁ぎわにあり、そこに止まり木(レバー)が立つ。
+ * 端から先はレーンが U ターンして 1 段下の走路につながるので、
+ * U ターンの半径ぶん外側へ膨らむ。コインの中心が壁に触れないよう
+ *   RUN_LEFT_X - Uターン半径 >= BOARD_LEFT + COIN_R
+ * を満たすこと(検算 §1)。
  */
-export const TIP_INSET = 84;
-/** 左端のレールの先端 x(奇数段)。ここに左のレバーが付く */
-export const TIP_LEFT_X = BOARD_LEFT + TIP_INSET;
-/** 右端のレールの先端 x(偶数段)。ここに右のレバーが付く */
-export const TIP_RIGHT_X = BOARD_RIGHT - TIP_INSET;
-/** 左右の先端の距離。1 回の飛距離はこの範囲に収まる */
-export const TIP_SPAN = TIP_RIGHT_X - TIP_LEFT_X;
+export const RUN_LEFT_X = 145;
+export const RUN_RIGHT_X = BOARD_RIGHT - (RUN_LEFT_X - BOARD_LEFT);
+/** 走路 1 本ぶんの水平距離 */
+export const RUN_SPAN = RUN_RIGHT_X - RUN_LEFT_X;
+/** 走路の傾き(端から端までの落差)。見た目の傾きで、物理には効かない */
+export const RUN_DROP = 22;
 
-/**
- * 板の高い端と溝(低い端)の落差。コインが先端まで転がるための傾き。
- *
- * 弾いたコインは自分のレールの上を逆走して飛び越すので、
- * この落差が大きいほど飛び越すのが難しくなる。ゆるい傾きにしてある。
- */
-export const PLANK_DROP = 8;
-/** 板の厚み。コインはこの実体と衝突し、決して貫通しない */
-export const PLANK_THICK = 20;
-
-/**
- * 空中のコインが「1 段下の板面レベル」をこれだけ下回ったら穴に落ちたとみなす。
- * 板の実体衝突(端で跳ねずに止まる)を先に解決した上での最終判定。
- */
-export const CAPTURE_BELOW = 14;
+/** レーン(溝)の幅。コインはこの中を走る */
+export const LANE_W = 64;
+/** レーンの縁(枠)の太さ */
+export const LANE_RAIL = 7;
 
 // ---------------------------------------------------------------- 物理
 
-export const GRAVITY = 2200; // px/s^2
-/** 板の上を転がるときの減衰 (1/s) */
-export const ROLL_DAMPING = 1.4;
 export const FIXED_DT = 1 / 60;
 /** タブ復帰時のスパイラル防止 */
 export const MAX_FRAME_TIME = 0.25;
 /**
- * 空中の 1 サブステップあたりの最大移動量 (px)。
- * これを超えないよう 1 フレームを分割して積分し、高速時のすり抜けを防ぐ。
+ * 1 サブステップあたりの最大移動量 (px)。
+ * これを超えないよう 1 フレームを分割して積分し、
+ * 高速時に穴や止まり木を飛ばして見落とすことを防ぐ。
  */
 export const MAX_SUBSTEP_MOVE = 6;
 
+/**
+ * レーンに沿った減速 (1/s)。コインはレーンの上を走り、これで勢いを失う。
+ * 速さは距離に対してほぼ一直線に落ちる(v ≒ v0 − LANE_DRAG · 走った距離)ので、
+ * 「引いた量 = 走る距離」が素直に対応する。
+ */
+export const LANE_DRAG = 1.6;
+/**
+ * レーンの傾きぶんの加速 (px/s^2)。
+ * 止まりかけたコインをゆっくり前へ送り、必ず次の止まり木か穴まで運ぶ。
+ * これがないとコインがレーンの途中で永久に止まって詰む。
+ */
+export const LANE_ASSIST = 95;
+/** 止まりかけの速さ = LANE_ASSIST / LANE_DRAG。穴に必ず捕まる速さであること */
+export const LANE_CREEP = LANE_ASSIST / LANE_DRAG;
+
+/**
+ * 穴の上をこの速さ未満で通ると落ちる。
+ * 勢いがあれば穴の口をかすめて渡れる、というのがこのゲームの「弱すぎ」の判定。
+ */
+export const HOLE_CATCH_SPEED = 170;
+/**
+ * 止まり木にこの速さ以下で来ると受け止められる。
+ * 超えていると乗り越えてしまい、そのまま次の穴へ落ちる = 「強すぎ」の判定。
+ */
+export const STOP_HOLD_SPEED = 130;
+/** 投入されたコインが 1 本目の走路を走り出す速さ */
+export const ENTRY_SPEED = 660;
+
 // ---------------------------------------------------------------- 弾き
 
-export const P_MIN = 665; // px/s
-export const P_MAX = 950; // px/s
 /**
- * 弾く角度。水平からの仰角。
- *
- * 上下から挟まれている:
- *   小さすぎる → 自分のレールを飛び越せずにめり込む(検算 §7)
- *   大きすぎる → 頂点が高くなりすぎて 1 段上のレールの裏に当たる(検算 §8)
+ * 弾く力 = レーンに沿った初速 (px/s)。手で決めず §5.3 の手順で逆算する。
+ * 弱すぎると穴を渡りきれず、強すぎると止まり木を乗り越える。
  */
-export const FLICK_RISE_DEG = 35;
-export const FLICK_RISE = (FLICK_RISE_DEG * Math.PI) / 180;
-/** 溝からこの距離以内にいる onPlank のコインだけが弾かれる。広めに取る */
-export const FLICK_ZONE_PX = 90;
+export const P_MIN = 430;
+export const P_MAX = 1080;
 export const FLICK_COOLDOWN = 0.35; // s
 /** レバーのはたきアニメの長さ */
 export const LEVER_SWING_TIME = 0.22; // s
@@ -216,8 +197,8 @@ export const COIN_SLOT_SIZE = { w: 118, h: 84 } as const;
 // ---------------------------------------------------------------- 難易度
 
 export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
-  easy: { id: 'easy', label: 'やさしい', plankWidth: 140 },
-  normal: { id: 'normal', label: 'ふつう', plankWidth: 100 },
+  easy: { id: 'easy', label: 'やさしい', holeSpan: 120 },
+  normal: { id: 'normal', label: 'ふつう', holeSpan: 190 },
 };
 
 // ---------------------------------------------------------------- 色
@@ -241,10 +222,11 @@ export const COLORS = {
   boardFace: '#FFF3CF',
   boardFaceDeep: '#F5DE9E',
 
-  // レール(板)
-  plankTop: '#F5B04C',
-  plankSide: '#C97F23',
-  plankEdge: '#6B4423',
+  // レーン(コインが走る溝)
+  laneRail: '#F5B04C',
+  laneFloor: '#C97F23',
+  laneShine: '#FFE0A8',
+  laneEdge: '#6B4423',
 
   lever: '#E8503A',
   leverDark: '#B23324',

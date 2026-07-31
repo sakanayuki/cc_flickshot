@@ -1,21 +1,15 @@
 /**
- * 盤面の幾何と「遊べるかどうか」の検算。
+ * レーンの幾何と「遊べるかどうか」の検算。
  *
  *     npm run verify
  *
  * 座標や物理定数を変えたら必ず実行すること(CI でも実行している)。
  *
- * このスクリプトは放物線を解かない。実際の物理(src/game/coin.ts)を回して測る。
+ * このスクリプトは式を解かない。実際の物理(src/game/coin.ts)を回して測る。
  * 以前、計算上は正しいのに遊べない不具合を何度も作り込んだため。
  *
- * §7 の貫通チェックは「棒(板)をコインがすり抜けて見える」という
- * 発注者からの不具合報告(改訂履歴(4))の再発防止。全パワーを掃引し、
- * 飛行中の全サブフレームでコインの円が板の実体に食い込んでいないことを見る。
- *
- * §8 は §7 の裏返し。いまの盤面ではコインが**自分のレールを飛び越して**飛ぶので、
- * 「エンジンが押し出して当たらなかったことにしている」だけの状態を検出できない。
- * そこで物理を通さない理想の放物線で、自分のレールと 1 段上のレールとの
- * 余裕を直接測る。
+ * とくに §3 は、5 回の操作すべてが**完全に同じ条件**であることを実測で確かめる。
+ * レーンの形をいじると、ここが真っ先に崩れる。
  */
 
 import {
@@ -25,35 +19,27 @@ import {
   BOARD_TOP,
   COIN_R,
   DIFFICULTIES,
+  ENTRY_SPEED,
   FIXED_DT,
-  FLICK_RISE,
-  FLICK_ZONE_PX,
-  GRAVITY,
+  HOLE_CATCH_SPEED,
   KNOB_R,
   KNOB_REST,
+  LANE_ASSIST,
+  LANE_CREEP,
+  LANE_DRAG,
+  LANE_W,
   LOGICAL_H,
   P_MAX,
   P_MIN,
-  PLANK_THICK,
   PULL_DEADZONE,
   ROW_COUNT,
-  ROW_GAP,
+  STOP_HOLD_SPEED,
   STROKE_FINGER,
   STROKE_KNOB,
   type DifficultyConfig,
-  type Row,
 } from '../src/config.ts';
-import {
-  buildHoles,
-  buildRows,
-  buildWinPocket,
-  flickDirX,
-  groovePos,
-  nearGapWidth,
-  onPlank,
-  plankSurfaceY,
-} from '../src/game/board.ts';
-import { canFlick, createCoin, flickCoin, placeAtStart, placeOnRow, stepCoin } from '../src/game/coin.ts';
+import { buildLane, posAt, runUpLength, turnOuterMargin, type Lane } from '../src/game/board.ts';
+import { canFlick, createCoin, flickCoin, placeAtStart, placeAtStop, stepCoin } from '../src/game/coin.ts';
 
 const failures: string[] = [];
 
@@ -62,22 +48,20 @@ function check(label: string, cond: boolean, detail = ''): void {
   if (!cond) failures.push(label);
 }
 
-type Outcome = 'win' | 'landed' | 'nearHole' | 'farHole' | 'stuck';
+type Outcome = 'win' | 'held' | 'weak' | 'strong' | 'stuck';
 
-/** 段 rowIndex の溝から power で弾いた結果 */
-function simulate(d: DifficultyConfig, rowIndex: number, power: number): Outcome {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const holes = buildHoles(d);
+/** 止まり木 stopIndex から power で弾いた結果 */
+function simulate(d: DifficultyConfig, stopIndex: number, power: number): Outcome {
+  const lane = buildLane(d);
   const coin = createCoin();
-  placeOnRow(coin, rows, rowIndex, groovePos(rows[rowIndex]!).x);
-  if (!flickCoin(coin, rows, power)) return 'stuck';
+  placeAtStop(coin, lane, stopIndex);
+  if (!flickCoin(coin, power)) return 'stuck';
 
-  for (let i = 0; i < 900; i++) {
-    const r = stepCoin(coin, FIXED_DT, rows, pocket, holes);
+  for (let i = 0; i < 2400; i++) {
+    const r = stepCoin(coin, FIXED_DT, lane);
     if (r.reachedWin) return 'win';
-    if (r.landedOnRow !== null) return 'landed';
-    if (r.fellInHole) return r.fellInHole.kind === 'near' ? 'nearHole' : 'farHole';
+    if (r.heldAtStop !== null) return 'held';
+    if (r.fellInHole) return r.fellKind === 'weak' ? 'weak' : 'strong';
   }
   return 'stuck';
 }
@@ -92,7 +76,7 @@ interface Band {
 }
 
 /** 成功する pull の割合と、その連続性・失敗のしかたを測る */
-function measure(d: DifficultyConfig, rowIndex: number): Band {
+function measure(d: DifficultyConfig, stopIndex: number): Band {
   const okPulls: number[] = [];
   let total = 0;
   let weakFails = 0;
@@ -101,11 +85,10 @@ function measure(d: DifficultyConfig, rowIndex: number): Band {
 
   for (let pull = PULL_DEADZONE; pull <= 1.0001; pull += step) {
     total++;
-    const power = P_MIN + (P_MAX - P_MIN) * pull;
-    const out = simulate(d, rowIndex, power);
-    if (out === 'win' || out === 'landed') okPulls.push(pull);
-    else if (out === 'nearHole') weakFails++;
-    else if (out === 'farHole') strongFails++;
+    const out = simulate(d, stopIndex, P_MIN + (P_MAX - P_MIN) * pull);
+    if (out === 'win' || out === 'held') okPulls.push(pull);
+    else if (out === 'weak') weakFails++;
+    else if (out === 'strong') strongFails++;
   }
 
   let gaps = 0;
@@ -122,80 +105,86 @@ function measure(d: DifficultyConfig, rowIndex: number): Band {
   };
 }
 
-// ---------------------------------------------------------------- 1
-console.log('=== 1. 段の座標 ===');
-for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  console.log(`  --- ${d.label}(板幅 ${d.plankWidth}）---`);
-  for (const r of rows) {
-    console.log(
-      `    段${r.index + 1}: 板 x=${r.left.toFixed(0)}..${r.right.toFixed(0)}  ` +
-        `溝=${r.grooveSide === 'left' ? '左端' : '右端'}  y=${r.grooveY}`,
-    );
+/** レーン上の全点が盤面に収まっているか */
+function laneInsideBoard(lane: Lane): string {
+  for (let s = 0; s <= lane.length; s += 4) {
+    const p = posAt(lane, s);
+    if (
+      p.x < BOARD_LEFT + COIN_R ||
+      p.x > BOARD_RIGHT - COIN_R ||
+      p.y < BOARD_TOP + COIN_R ||
+      p.y > BOARD_BOTTOM - COIN_R
+    ) {
+      return `s=${s.toFixed(0)} (${p.x.toFixed(0)},${p.y.toFixed(0)})`;
+    }
   }
-  console.log(`    あたりの口: x=${pocket.left.toFixed(0)}..${pocket.right.toFixed(0)}  y=${pocket.y}`);
+  return '';
+}
 
-  const inside = rows.every((r) => r.left >= BOARD_LEFT && r.right <= BOARD_RIGHT);
-  check(`${d.label}: 板が盤面に収まっている`, inside);
-  check(
-    `${d.label}: あたりの口が盤面に収まっている`,
-    pocket.left >= BOARD_LEFT && pocket.right <= BOARD_RIGHT && pocket.y < BOARD_BOTTOM,
-  );
-  // 弾く点(先端)が画面の端にある = 実機のレバーの位置
-  for (const r of rows) {
-    const g = groovePos(r);
-    const toWall = r.grooveSide === 'left' ? g.x - BOARD_LEFT : BOARD_RIGHT - g.x;
+// ---------------------------------------------------------------- 1
+console.log('=== 1. レーンの形 ===');
+for (const d of Object.values(DIFFICULTIES)) {
+  const lane = buildLane(d);
+  console.log(`  --- ${d.label}(穴の長さ ${d.holeSpan}）---`);
+  console.log(`    レーン全長 ${lane.length.toFixed(0)}px  走路 ${lane.runs.length} 本`);
+  console.log(`    止まり木 s = ${lane.stops.map((s) => s.s.toFixed(0)).join(', ')}`);
+  console.log(`    穴       s = ${lane.holes.map((h) => `${h.s0.toFixed(0)}..${h.s1.toFixed(0)}`).join('  ')}`);
+  console.log(`    あたりの口 s = ${lane.goalS.toFixed(0)}`);
+
+  check(`${d.label}: レーンが盤面からはみ出さない`, laneInsideBoard(lane) === '', laneInsideBoard(lane));
+  check(`${d.label}: 止まり木が ${ROW_COUNT} 個ある`, lane.stops.length === ROW_COUNT);
+  // 止まり木は走路の端 = 画面の左右の端にある(実機のレバーの位置)
+  const boardW = BOARD_RIGHT - BOARD_LEFT;
+  for (const stop of lane.stops) {
+    const toWall = stop.side === 'left' ? stop.pos.x - BOARD_LEFT : BOARD_RIGHT - stop.pos.x;
     check(
-      `${d.label} 段${r.index + 1}: 弾く点が壁ぎわにある`,
-      toWall <= (BOARD_RIGHT - BOARD_LEFT) * 0.2,
+      `${d.label} 止まり木${stop.index + 1}: 画面の端にある`,
+      toWall <= boardW * 0.2,
       `壁まで ${toWall.toFixed(0)}px`,
     );
-    // 奥の穴が存在する = 先端と壁の間に、コインが落ちるだけの隙間がある
-    check(
-      `${d.label} 段${r.index + 1}: 先端と壁の間に奥の穴がある`,
-      toWall >= COIN_R * 2,
-      `${toWall.toFixed(0)}px`,
-    );
   }
-  check(`${d.label}: 中央の穴が残っている`, nearGapWidth(d) >= COIN_R * 2, `${nearGapWidth(d)}px`);
+  // 左右交互に並んでいる(写真と同じジグザグ)
+  const sides = lane.stops.map((s) => s.side).join(',');
+  check(`${d.label}: 止まり木が左右交互`, sides === 'left,right,left,right,left', sides);
+  check(`${d.label}: U ターンが壁に食い込まない`, turnOuterMargin() >= 0, `余裕 ${turnOuterMargin().toFixed(0)}px`);
+  check(`${d.label}: 穴がコインより長い`, d.holeSpan > COIN_R * 2, `${d.holeSpan}px`);
 }
 
 // ---------------------------------------------------------------- 2
-console.log('\n=== 2. 6つの遷移の均一性 ===');
+console.log('\n=== 2. 5つの操作の均一性 ===');
 for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const jumps: Array<[number, number]> = [];
-  for (let i = 0; i < ROW_COUNT; i++) {
-    const from = groovePos(rows[i]!);
-    const dir = flickDirX(rows[i]!);
-    const target =
-      i + 1 < ROW_COUNT
-        ? { near: dir < 0 ? rows[i + 1]!.right : rows[i + 1]!.left, y: rows[i + 1]!.grooveY }
-        : { near: dir < 0 ? pocket.right : pocket.left, y: pocket.y };
-    jumps.push([Math.abs(from.x - target.near), target.y - rows[i]!.grooveY]);
+  const lane = buildLane(d);
+  // 止まり木 k から見た「U ターン+穴までの距離」「穴の長さ」「穴から次の止まり木までの助走」
+  const shape: Array<[number, number, number]> = [];
+  for (let k = 0; k < ROW_COUNT; k++) {
+    const from = lane.stops[k]!.s;
+    const hole = lane.holes[k]!;
+    const to = k + 1 < ROW_COUNT ? lane.stops[k + 1]!.s : lane.goalS;
+    shape.push([hole.s0 - from, hole.s1 - hole.s0, to - hole.s1]);
   }
-  const uniform = jumps.every(
-    (j) => Math.abs(j[0] - jumps[0]![0]) < 0.5 && Math.abs(j[1] - jumps[0]![1]) < 0.5,
-  );
+  const uniform = shape.every((x) => x.every((v, i) => Math.abs(v - shape[0]![i]!) < 0.5));
   console.log(
-    `  ${d.label}: 手前の穴を飛び越す横距離=${jumps[0]![0].toFixed(0)}  落差=${jumps[0]![1].toFixed(0)}`,
+    `  ${d.label}: 助走まで ${shape[0]![0].toFixed(0)}  穴 ${shape[0]![1].toFixed(0)}  ` +
+      `穴のあと ${shape[0]![2].toFixed(0)}`,
   );
-  check(`${d.label}: 全遷移が同一条件`, uniform);
-  check(`${d.label}: 手前の穴が存在する`, jumps[0]![0] > COIN_R, `${jumps[0]![0].toFixed(0)}px`);
+  check(`${d.label}: 全操作が同一条件`, uniform);
+  check(
+    `${d.label}: 穴のあとに助走がある`,
+    runUpLength(lane, 1) > COIN_R * 2,
+    `${runUpLength(lane, 1).toFixed(0)}px`,
+  );
 }
 
 // ---------------------------------------------------------------- 3
-console.log('\n=== 3. 各遷移の成功域(実シミュレーション)===');
+console.log('\n=== 3. 各操作の成功域(実シミュレーション)===');
 const fracs: Record<string, number> = {};
 for (const d of Object.values(DIFFICULTIES)) {
   console.log(`  --- ${d.label} ---`);
   let worst = 1;
-  for (let i = 0; i < ROW_COUNT; i++) {
-    const b = measure(d, i);
+  for (let k = 0; k < ROW_COUNT; k++) {
+    const b = measure(d, k);
     worst = Math.min(worst, b.frac);
-    const label = i + 1 < ROW_COUNT ? `段${i + 1}→段${i + 2}` : `段${i + 1}→あたりの口`;
+    const label = k + 1 < ROW_COUNT ? `${k + 1}回目→止まり木${k + 2}` : `${k + 1}回目→あたりの口`;
     console.log(
       `    ${label}: 成功 ${(b.frac * 100).toFixed(0)}%  ` +
         `pull ${b.minPull.toFixed(2)}〜${b.maxPull.toFixed(2)}` +
@@ -203,13 +192,12 @@ for (const d of Object.values(DIFFICULTIES)) {
         `  弱すぎ失敗 ${b.weakFails} / 強すぎ失敗 ${b.strongFails}`,
     );
     check(`${d.label} ${label}: 成功域が連続している`, b.gaps === 0);
-    // 片側しか失敗しないなら板が壁に接していて設計が崩れている
     check(`${d.label} ${label}: 弱すぎでも強すぎでも落ちる`, b.weakFails > 0 && b.strongFails > 0);
   }
   fracs[d.id] = worst;
   const target = d.id === 'easy' ? [0.6, 1.0] : [0.3, 0.5];
   check(
-    `${d.label}: 全遷移の成功域が ${(target[0]! * 100).toFixed(0)}〜${(target[1]! * 100).toFixed(0)}%`,
+    `${d.label}: 全操作の成功域が ${(target[0]! * 100).toFixed(0)}〜${(target[1]! * 100).toFixed(0)}%`,
     worst >= target[0]! && worst <= target[1]!,
     `最小 ${(worst * 100).toFixed(0)}%`,
   );
@@ -223,50 +211,36 @@ check(
 // ---------------------------------------------------------------- 4
 console.log('\n=== 4. 投入直後の安全性 ===');
 for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const holes = buildHoles(d);
+  const lane = buildLane(d);
   const coin = createCoin();
-  // 投入位置から放置しても落ちず、溝で止まって弾ける状態になること
-  placeAtStart(coin, rows);
+  placeAtStart(coin, lane);
   let fell = false;
-  for (let i = 0; i < 600; i++) {
-    if (stepCoin(coin, FIXED_DT, rows, pocket, holes).fellInHole) fell = true;
+  for (let i = 0; i < 900; i++) {
+    if (stepCoin(coin, FIXED_DT, lane).fellInHole) fell = true;
   }
   check(`${d.label}: 投入後に放置しても落ちない`, !fell);
-  check(`${d.label}: 放置すると溝で止まって弾ける`, canFlick(coin, rows) && coin.vx === 0);
+  check(
+    `${d.label}: 放置すると 1 つ目の止まり木で止まって弾ける`,
+    canFlick(coin) && coin.stopIndex === 0,
+  );
 }
 
 // ---------------------------------------------------------------- 5
-console.log('\n=== 5. 盤面の外に出ないこと ===');
+console.log('\n=== 5. 途中で詰まないこと ===');
+/**
+ * レーンの途中で永久に止まると、弾くこともできず結果も出ない = 詰み。
+ * LANE_ASSIST がこれを防いでいるので、全パワーで「必ず決着する」ことを見る。
+ */
 for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const holes = buildHoles(d);
-  let escaped = '';
-  for (let row = 0; row < ROW_COUNT && !escaped; row++) {
-    for (let power = P_MIN; power <= P_MAX && !escaped; power += 25) {
-      const coin = createCoin();
-      placeOnRow(coin, rows, row, groovePos(rows[row]!).x);
-      flickCoin(coin, rows, power);
-      for (let i = 0; i < 300; i++) {
-        stepCoin(coin, FIXED_DT, rows, pocket, holes);
-        if (coin.state === 'falling' || coin.state === 'win') break;
-        const p = coin.pos;
-        if (
-          !Number.isFinite(p.x) ||
-          !Number.isFinite(p.y) ||
-          p.x < BOARD_LEFT + COIN_R - 1 ||
-          p.x > BOARD_RIGHT - COIN_R + 1 ||
-          p.y < BOARD_TOP - 1
-        ) {
-          escaped = `段${row + 1} power=${power} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)})`;
-          break;
-        }
-      }
+  let stuck = '';
+  for (let k = 0; k < ROW_COUNT && !stuck; k++) {
+    for (let power = P_MIN; power <= P_MAX && !stuck; power += 5) {
+      if (simulate(d, k, power) === 'stuck') stuck = `止まり木${k + 1} power=${power}`;
     }
   }
-  check(`${d.label}: どのパワーでもコインが盤面外に出ない`, escaped === '', escaped);
+  check(`${d.label}: どのパワーでも必ず決着する`, stuck === '', stuck);
+  check(`${d.label}: 止まりかけの速さが穴に必ず捕まる`, LANE_CREEP < HOLE_CATCH_SPEED,
+    `${LANE_CREEP.toFixed(0)} < ${HOLE_CATCH_SPEED}`);
 }
 
 // ---------------------------------------------------------------- 6
@@ -280,112 +254,39 @@ check('プランジャー帯が画面の 25% 以下', bandH / LOGICAL_H <= 0.25)
 check('盤面とノブが重ならない', KNOB_REST.y - KNOB_R >= BOARD_BOTTOM);
 check('指のストロークが画面内に収まる', LOGICAL_H - KNOB_REST.y >= STROKE_FINGER);
 check('引ききってもノブが画面内に残る', KNOB_REST.y + STROKE_KNOB + KNOB_R <= LOGICAL_H);
-for (const d of Object.values(DIFFICULTIES)) {
-  check(`${d.label}: 弾きゾーンが中央の穴より狭い`, FLICK_ZONE_PX < nearGapWidth(d));
-}
-console.log(`  重力=${GRAVITY} 段間=${ROW_GAP} 弾き力=${P_MIN}..${P_MAX}`);
+check('レーンがコインより広い', LANE_W > COIN_R * 2, `${LANE_W} > ${COIN_R * 2}`);
+console.log(
+  `  減速=${LANE_DRAG} 傾き=${LANE_ASSIST} 止まり木=${STOP_HOLD_SPEED} 穴=${HOLE_CATCH_SPEED} ` +
+    `投入=${ENTRY_SPEED} 弾き力=${P_MIN}..${P_MAX}`,
+);
 
 // ---------------------------------------------------------------- 7
-console.log('\n=== 7. 板を貫通しないこと(全パワー掃引)===');
-
-/** コインの円が板の実体(上面から厚みぶんの台形)に食い込んでいるか */
-function penetrationDepth(rows: readonly Row[], x: number, y: number): number {
-  let worst = 0;
-  for (const row of rows) {
-    if (!onPlank(row, x)) continue;
-    const top = plankSurfaceY(row, x);
-    const bottom = top + PLANK_THICK;
-    // コイン中心が板の内部帯(上面より下、底面+半径より上)にどれだけ入ったか
-    if (y > top - COIN_R + 1 && y < bottom + COIN_R - 1) {
-      const depth = Math.min(y - (top - COIN_R + 1), bottom + COIN_R - 1 - y);
-      worst = Math.max(worst, depth);
-    }
-  }
-  return worst;
-}
-
-for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  const holes = buildHoles(d);
-  let worstDepth = 0;
-  let worstAt = '';
-  for (let row = 0; row < ROW_COUNT; row++) {
-    for (let power = P_MIN; power <= P_MAX; power += 10) {
-      const coin = createCoin();
-      placeOnRow(coin, rows, row, groovePos(rows[row]!).x);
-      flickCoin(coin, rows, power);
-      for (let i = 0; i < 300; i++) {
-        stepCoin(coin, FIXED_DT, rows, pocket, holes);
-        if (coin.state !== 'airborne') break;
-        const depth = penetrationDepth(rows, coin.pos.x, coin.pos.y);
-        if (depth > worstDepth) {
-          worstDepth = depth;
-          worstAt = `段${row + 1} power=${power} pos=(${coin.pos.x.toFixed(0)},${coin.pos.y.toFixed(0)})`;
-        }
-      }
-    }
-  }
-  // フレーム間の押し出し誤差として数 px までは許す(見た目には分からない)
-  check(
-    `${d.label}: 飛行中のコインが板にめり込まない(最大 ${worstDepth.toFixed(1)}px)`,
-    worstDepth <= 4,
-    worstAt,
-  );
-}
-
-// ---------------------------------------------------------------- 8
-console.log('\n=== 8. 弾道が自分のレールと 1 段上のレールを避けること ===');
-
+console.log('\n=== 7. コインがレーンから外れないこと(全パワー掃引)===');
 /**
- * コインの円がレールの実体にどれだけ食い込むか。物理エンジンを通さず、
- * 理想の放物線で測る。エンジン側の押し出しに隠されると
- * 「当たっているのに検算は通る」ことが起きるため。
+ * コインはレーンに沿った 1 次元でしか動かないので、原理的に外れようがない。
+ * それでも s が負や NaN になっていないか、必ず前へ進んでいるかは見ておく。
  */
-function overlapWithPlank(row: Row, cx: number, cy: number): number {
-  const qx = Math.max(row.left, Math.min(row.right, cx));
-  const top = plankSurfaceY(row, qx);
-  const qy = Math.max(top, Math.min(top + PLANK_THICK, cy));
-  return COIN_R - Math.hypot(cx - qx, cy - qy);
-}
-
 for (const d of Object.values(DIFFICULTIES)) {
-  const rows = buildRows(d);
-  const pocket = buildWinPocket(d);
-  let worst = -Infinity;
-  let worstAt = '';
-  for (let i = 0; i < ROW_COUNT; i++) {
-    const row = rows[i]!;
-    const from = groovePos(row);
-    const dir = flickDirX(row);
-    const targetY = i + 1 < ROW_COUNT ? rows[i + 1]!.grooveY : pocket.y;
-    for (let power = P_MIN; power <= P_MAX; power += 5) {
-      const vx = dir * power * Math.cos(FLICK_RISE);
-      const vy = -power * Math.sin(FLICK_RISE);
-      for (let t = 0.004; t < 3; t += 0.004) {
-        const cx = from.x + vx * t;
-        const cy = from.y + vy * t + 0.5 * GRAVITY * t * t;
-        if (cy > targetY - COIN_R) break; // 着地レベルに到達。ここから先は着地判定の領域
-        if (cx < BOARD_LEFT + COIN_R || cx > BOARD_RIGHT - COIN_R) break;
-        // 発射の瞬間はコインが自分のレールに接している。そこは判定から外す
-        if (Math.abs(cx - from.x) < COIN_R) continue;
-        for (const other of rows) {
-          if (other.index > i) continue; // 下の段は着地先。避ける対象ではない
-          const o = overlapWithPlank(other, cx, cy);
-          if (o > worst) {
-            worst = o;
-            worstAt = `段${i + 1}→段${other.index + 1} power=${power} pos=(${cx.toFixed(0)},${cy.toFixed(0)})`;
-          }
-        }
+  const lane = buildLane(d);
+  let bad = '';
+  for (let k = 0; k < ROW_COUNT && !bad; k++) {
+    for (let power = P_MIN; power <= P_MAX && !bad; power += 10) {
+      const coin = createCoin();
+      placeAtStop(coin, lane, k);
+      flickCoin(coin, power);
+      let prev = coin.s;
+      for (let i = 0; i < 600; i++) {
+        stepCoin(coin, FIXED_DT, lane);
+        if (coin.state !== 'onLane') break;
+        if (!Number.isFinite(coin.s) || !Number.isFinite(coin.v)) bad = `NaN 止まり木${k + 1}`;
+        else if (coin.s < prev - 0.001) bad = `後戻り 止まり木${k + 1} power=${power}`;
+        else if (coin.s < 0 || coin.s > lane.length) bad = `範囲外 s=${coin.s.toFixed(0)}`;
+        if (bad) break;
+        prev = coin.s;
       }
     }
   }
-  check(
-    `${d.label}: 飛び出したコインが自分と上のレールに当たらない(余裕 ${(-worst).toFixed(1)}px)`,
-    // ぎりぎり 0 では調整のたびに崩れる。コイン半径の半分は空けておく
-    worst < -COIN_R / 2,
-    worstAt,
-  );
+  check(`${d.label}: どのパワーでもコインがレーンから外れない`, bad === '', bad);
 }
 
 // ---------------------------------------------------------------- 結果

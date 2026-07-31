@@ -1,5 +1,6 @@
 /**
- * ゲーム画面。コインは右上から入り、レールを 5 段降りて、あたりの口を目指す。
+ * ゲーム画面。コインは右上から入り、1 本につながったレーンを走って降り、
+ * あたりの口を目指す。コインは飛ばない。レーンの上を走る。
  */
 
 import {
@@ -19,24 +20,15 @@ import {
   ROW_COUNT,
   WIN_ANIM,
   type DifficultyConfig,
-  type Row,
   type Vec2,
-  type WinPocket,
 } from '../config.ts';
-import {
-  buildHoles,
-  buildRows,
-  buildWinPocket,
-  groovePos,
-  onPlank,
-  plankSurfaceY,
-  type Hole,
-} from '../game/board.ts';
+import { buildLane, nextHole, type Lane } from '../game/board.ts';
 import {
   canFlick,
   createCoin,
   flickCoin,
   placeAtStart,
+  runIndexOf,
   stepCoin,
   type Coin,
 } from '../game/coin.ts';
@@ -56,20 +48,20 @@ import {
   drawCabinetBase,
   drawCabinetLower,
   drawCoin,
-  drawCoinShadow,
   drawCoinSlot,
   drawEntryChute,
   drawGiveUpButton,
   drawHandGuide,
   drawInsertCoin,
-  drawLever,
+  drawLane,
+  drawLaneArrows,
   drawLeverRods,
-  drawPlank,
   drawPlunger,
   drawRoundHole,
   drawRoundHoleFront,
   drawSideAnimals,
   drawSideKnobs,
+  drawStopper,
   drawWinPocket,
 } from '../render/drawings.ts';
 import { ParticleSystem } from '../render/particles.ts';
@@ -81,9 +73,7 @@ type GamePhase = 'insert' | 'play' | 'ending';
 
 export class GameScene implements Scene {
   private difficulty: DifficultyConfig = DIFFICULTIES.easy;
-  private rows: Row[] = [];
-  private pocket: WinPocket = { left: 0, right: 0, y: 0 };
-  private holes: Hole[] = [];
+  private lane: Lane = buildLane(DIFFICULTIES.easy);
 
   private phase: GamePhase = 'insert';
   private phaseTime = 0;
@@ -120,9 +110,7 @@ export class GameScene implements Scene {
   enter(params: unknown): void {
     const p = params as GameParams | undefined;
     this.difficulty = p?.difficulty ?? DIFFICULTIES[this.app.save.lastDifficulty];
-    this.rows = buildRows(this.difficulty);
-    this.pocket = buildWinPocket(this.difficulty);
-    this.holes = buildHoles(this.difficulty);
+    this.lane = buildLane(this.difficulty);
 
     this.phase = 'insert';
     this.phaseTime = 0;
@@ -160,7 +148,7 @@ export class GameScene implements Scene {
     switch (this.phase) {
       case 'insert':
         if (this.phaseTime >= INSERT_ANIM) {
-          placeAtStart(this.coin, this.rows);
+          placeAtStart(this.coin, this.lane);
           this.phase = 'play';
           this.phaseTime = 0;
         }
@@ -197,7 +185,7 @@ export class GameScene implements Scene {
       if (this.pendingTimer <= 0) {
         const power = this.pendingPower;
         this.pendingPower = null;
-        if (flickCoin(this.coin, this.rows, power)) {
+        if (flickCoin(this.coin, power)) {
           this.particles.emitStars({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R * 0.6 }, 5);
         }
       }
@@ -209,18 +197,18 @@ export class GameScene implements Scene {
   private stepCoinWithEffects(dt: number): void {
     if (this.squashTimer > 0) this.squashTimer = Math.max(0, this.squashTimer - dt);
 
-    const r = stepCoin(this.coin, dt, this.rows, this.pocket, this.holes);
+    const r = stepCoin(this.coin, dt, this.lane);
 
-    if (this.coin.state === 'onPlank') {
-      this.depth = Math.max(this.depth, this.coin.rowIndex + 1);
+    if (this.coin.state === 'onLane') {
+      this.depth = Math.max(this.depth, runIndexOf(this.lane, this.coin.s) + 1);
     }
-    if (r.landedOnRow !== null) {
+    if (r.heldAtStop !== null) {
       this.squashTimer = LAND_SQUASH_TIME;
       this.particles.emitPuff({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R });
     }
-    if (r.bonk && this.time - this.lastBonk > 0.25) {
+    if (r.overran && this.time - this.lastBonk > 0.25) {
       this.lastBonk = this.time;
-      this.particles.emitStars(r.bonk, 4, '#FFD24A');
+      this.particles.emitStars(r.overran, 4, '#FFD24A');
     }
     if (this.phase !== 'ending') {
       if (r.fellInHole) {
@@ -324,26 +312,27 @@ export class GameScene implements Scene {
 
   render(ctx: Ctx): void {
     drawCabinetBase(ctx);
-    drawBoardFace(ctx, this.rows, this.pocket);
+    drawBoardFace(ctx, this.lane);
 
-    drawEntryChute(ctx, this.rows);
-    for (const h of this.holes) drawRoundHole(ctx, h);
-    drawWinPocket(ctx, this.pocket, this.flagWave);
-    drawSideAnimals(ctx, this.rows, this.time);
-    drawLeverRods(ctx, this.rows);
-    for (const row of this.rows) drawPlank(ctx, row);
-    for (const row of this.rows) drawLever(ctx, row, this.levers[row.index]!);
+    drawEntryChute(ctx, this.lane);
+    drawSideAnimals(ctx, this.lane, this.time);
+    drawLeverRods(ctx, this.lane);
+    drawLane(ctx, this.lane);
+    drawLaneArrows(ctx, this.lane);
+    for (const h of this.lane.holes) drawRoundHole(ctx, h);
+    drawWinPocket(ctx, this.lane, this.flagWave);
+    for (const stop of this.lane.stops) drawStopper(ctx, this.lane, stop, this.levers[stop.index]!);
 
     this.renderCoin(ctx);
     this.particles.render(ctx);
 
     drawBoardFrame(ctx);
-    drawSideKnobs(ctx, this.rows, this.levers);
+    drawSideKnobs(ctx, this.lane, this.levers);
     drawCabinetLower(ctx);
 
     drawCoinSlot(ctx);
     if (this.phase === 'insert') {
-      drawInsertCoin(ctx, this.rows, clamp01(this.phaseTime / INSERT_ANIM));
+      drawInsertCoin(ctx, this.lane, clamp01(this.phaseTime / INSERT_ANIM));
     }
 
     drawPlunger(
@@ -377,26 +366,9 @@ export class GameScene implements Scene {
       return;
     }
 
-    if (c.state === 'airborne') {
-      this.renderAirShadow(ctx, c);
-    }
     const squash =
       this.squashTimer > 0 ? Math.sin((this.squashTimer / LAND_SQUASH_TIME) * Math.PI) : 0;
     drawCoin(ctx, c.pos, COIN_R, 0, c.spin, squash);
-  }
-
-  /** 空中のコインの真下、着地面に落ちる影。どこに落ちるかの手がかり */
-  private renderAirShadow(ctx: Ctx, c: Coin): void {
-    const target = c.rowIndex + 1;
-    let surfaceY: number;
-    if (target >= ROW_COUNT) {
-      surfaceY = this.pocket.y + 4;
-    } else {
-      const row = this.rows[target]!;
-      surfaceY = onPlank(row, c.pos.x) ? plankSurfaceY(row, c.pos.x) : row.grooveY + 6;
-    }
-    const height = surfaceY - (c.pos.y + COIN_R);
-    if (height > 6) drawCoinShadow(ctx, c.pos.x, surfaceY, height);
   }
 
   /** 丸穴に「ぽとん」と沈む。穴の手前のリムがコインを隠す */
@@ -440,20 +412,18 @@ export class GameScene implements Scene {
       this.phase === 'play' &&
       this.plunger.idleTime >= GUIDE_IDLE_DELAY &&
       this.plunger.cooldown <= 0 &&
-      this.coin.state === 'onPlank' &&
-      Math.abs(this.coin.vx) < 5 &&
-      canFlick(this.coin, this.rows)
+      canFlick(this.coin)
     );
   }
 
   private renderDebug(ctx: Ctx): void {
     const c = this.coin;
-    const g = c.state === 'onPlank' ? groovePos(this.rows[c.rowIndex]!) : null;
+    const nh = nextHole(this.lane, c.s);
     const lines = [
-      `phase=${this.phase} state=${c.state}`,
-      `row=${c.rowIndex + 1} x=${c.x.toFixed(0)} vx=${c.vx.toFixed(0)} groove=${g?.x.toFixed(0) ?? '-'}`,
+      `phase=${this.phase} state=${c.state} held=${c.held}`,
+      `s=${c.s.toFixed(0)} v=${c.v.toFixed(0)} stop=${c.stopIndex} hole=${nh ? nh.s0.toFixed(0) : '-'}`,
       `pull=${this.plunger.pull.toFixed(3)} depth=${this.depth}`,
-      `diff=${this.difficulty.id} plank=${this.difficulty.plankWidth}`,
+      `diff=${this.difficulty.id} hole=${this.difficulty.holeSpan}`,
     ];
     ctx.save();
     ctx.globalAlpha = 0.85;
