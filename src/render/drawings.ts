@@ -23,7 +23,6 @@ import {
   LINE_W,
   LOGICAL_H,
   LOGICAL_W,
-  PLANK_LIP,
   PLANK_THICK,
   ROW_COUNT,
   type AnimalKind,
@@ -236,12 +235,12 @@ export function drawBoardFace(ctx: Ctx, rows: readonly Row[], pocket: WinPocket)
   }
   ctx.globalAlpha = 1;
 
-  // 印刷された草木。棒の高い端の外側(コインが通らない側)にだけ置いて、
-  // 実機のような賑やかさを出しつつ、落下地点の見通しは損なわない
+  // 印刷された草木。レールと丸穴の間(段と段のあいだの壁ぎわ)に置く。
+  // コインの通り道にも穴にもかからないので、落下地点の見通しを損なわない
   rows.forEach((row, i) => {
-    const toRight = row.grooveSide === 'left';
-    const bx = toRight ? row.right + 36 : row.left - 36;
-    const by = row.grooveY - 46;
+    const atRight = row.grooveSide === 'right';
+    const bx = atRight ? BOARD_RIGHT - 44 : BOARD_LEFT + 44;
+    const by = row.grooveY + 78;
     ctx.globalAlpha = 0.32;
     for (let k = 0; k < 3; k++) {
       const gx = bx + (k - 1) * 13;
@@ -366,7 +365,7 @@ export function drawRoundHoleFront(ctx: Ctx, hole: Hole): void {
 
 // ---------------------------------------------------------------- レール(板)
 
-/** 1 段ぶんのレール。溝(先端)へ向かって下る木の板 */
+/** 1 段ぶんのレール。壁ぎわの溝(先端)へ向かって下る木の板 */
 export function drawPlank(ctx: Ctx, row: Row): void {
   const yL = plankSurfaceY(row, row.left);
   const yR = plankSurfaceY(row, row.right);
@@ -418,37 +417,34 @@ export function drawPlank(ctx: Ctx, row: Row): void {
   ellipse(ctx, gPos.x - flickDirX(row) * 6, row.grooveY + 2.5, 17, 5);
   paint(ctx, 'rgba(0,0,0,0.28)', null, 0);
 
-  // 先端の丸い角
+  // 先端の丸い角。ここが壁ぎわの「弾く点」
   circle(ctx, gPos.x, row.grooveY + PLANK_THICK / 2, PLANK_THICK / 2);
   paint(ctx, COLORS.plankSide, COLORS.ink, LINE_W);
 
-  // 高い端の返し(ストッパー)
-  const dirIn = downhillDirX(row);
-  roundRect(ctx, hiX - 9, hiY - PLANK_LIP - 4, 18, PLANK_LIP + PLANK_THICK + 4, 6);
+  // 高い端の口金。返しは付けない(付けると弾いたコインが自分のレールを
+  // 飛び越せなくなる)。着地するコインはここを越えて板の上に乗る
+  circle(ctx, hiX, hiY + PLANK_THICK / 2, PLANK_THICK / 2);
   paint(ctx, COLORS.plankEdge, COLORS.ink, LINE_W);
-  void dirIn;
 
   // ネジ
-  screw(ctx, hiX + downhillDirX(row) * 30, plankSurfaceY(row, hiX + downhillDirX(row) * 30) + PLANK_THICK * 0.55, 5);
-  screw(
-    ctx,
-    gPos.x + downhillDirX(row) * -34 + downhillDirX(row) * 0,
-    plankSurfaceY(row, gPos.x - downhillDirX(row) * 34) + PLANK_THICK * 0.55,
-    5,
-  );
+  const inward = downhillDirX(row);
+  for (const at of [hiX + inward * 26, gPos.x - inward * 26]) {
+    screw(ctx, at, plankSurfaceY(row, at) + PLANK_THICK * 0.55, 5);
+  }
 }
 
 // ---------------------------------------------------------------- レバー(ハンマー)
 
 /**
- * レバー。板の先端の下にぶら下がるハンマーで、発射すると
- * 外向きに振り上がって溝のコインを下からはたき出す。
+ * レバー。実機と同じく**壁の側から**先端のコインの横に立つハンマーで、
+ * 発射すると盤面の内側へ振り上がり、溝のコインをはたき出す。
+ * 軸は先端より壁寄り(コインの外側)にあるので、振ると必ず内側へ押し出す。
  */
 export function drawLever(ctx: Ctx, row: Row, lever: LeverState): void {
   const gPos = groovePos(row);
   const out = flickDirX(row);
-  const pivot: Vec2 = { x: gPos.x - out * 2, y: row.grooveY + PLANK_THICK + 20 };
-  const len = 44;
+  const pivot: Vec2 = { x: gPos.x - out * 20, y: row.grooveY + PLANK_THICK + 18 };
+  const len = 46;
 
   // 姿勢: swing<0 はタメ(内側へ巻き上げ)、swing>0 は打撃(外向きに振り上げ)
   const deg = -10 + (lever.swing < 0 ? lever.swing * 34 : lever.swing * 58);
@@ -494,18 +490,18 @@ export function drawLever(ctx: Ctx, row: Row, lever: LeverState): void {
  * 筐体の左右の縁に並ぶレバーのノブ。
  *
  * 実機では、各段のレバーの軸が筐体の側面を貫いて丸いノブになっている。
- * 板は溝の反対側の壁へ向かって伸びているので、ノブはその壁側に付く。
- * 結果として段ごとに左・右・左…と交互に並ぶ(実機の写真と同じ)。
+ * レールの先端(弾く点)は壁のすぐ内側にあるので、ノブはその真横に付く。
+ * 先端が右・左・右…と交互なので、ノブも交互に並ぶ(実機の写真と同じ)。
  */
 export function drawSideKnobs(ctx: Ctx, rows: readonly Row[], levers: readonly LeverState[]): void {
   rows.forEach((row) => {
     const lever = levers[row.index];
     if (!lever) return;
-    // 板が伸びていく側の壁にノブが付く
-    const toRight = row.grooveSide === 'left';
-    const wallX = toRight ? BOARD_RIGHT + 22 : BOARD_LEFT - 22;
-    const y = row.grooveY + PLANK_THICK + 20;
-    const dirIn = toRight ? -1 : 1; // 盤面の内側へ向かう向き
+    // 先端がある側の壁にノブが付く
+    const atRight = row.grooveSide === 'right';
+    const wallX = atRight ? BOARD_RIGHT + 22 : BOARD_LEFT - 22;
+    const y = row.grooveY + PLANK_THICK + 18;
+    const dirIn = atRight ? -1 : 1; // 盤面の内側へ向かう向き
 
     // 引くとノブが外へ出て、はたくと戻る
     const out = lever.swing < 0 ? -lever.swing * 9 : (1 - lever.swing) * 2;
@@ -526,13 +522,13 @@ export function drawSideKnobs(ctx: Ctx, rows: readonly Row[], levers: readonly L
   });
 }
 
-/** ノブと弾き部をつなぐロッド。板より先(奥)に描く */
+/** ノブとレバーの軸をつなぐロッド。板より先(奥)に描く */
 export function drawLeverRods(ctx: Ctx, rows: readonly Row[]): void {
   rows.forEach((row) => {
-    const toRight = row.grooveSide === 'left';
-    const wallX = toRight ? BOARD_RIGHT : BOARD_LEFT;
+    const atRight = row.grooveSide === 'right';
+    const wallX = atRight ? BOARD_RIGHT : BOARD_LEFT;
     const gPos = groovePos(row);
-    const y = row.grooveY + PLANK_THICK + 20;
+    const y = row.grooveY + PLANK_THICK + 18;
     ctx.globalAlpha = 0.55;
     line(ctx, { x: wallX, y }, { x: gPos.x, y }, '#8E8A82', 6);
     ctx.globalAlpha = 1;
@@ -692,16 +688,17 @@ export function drawCoinSlot(ctx: Ctx): void {
   text(ctx, 'コイン', c.x, c.y + 26, { size: 17, color: '#FFF8EC', outline: 0 });
 }
 
-/** 投入口から 1 段目の板の高い端へ降りるシュートの経路 */
+/**
+ * 投入口から 1 段目の板の高い端へ降りるシュートの経路。
+ * 1 段目は右端が先端なので、高い端は盤面の内側(左)にある。
+ * 投入口(右上)から内側へ流し込む、ゆるい下り坂になる。
+ */
 export function entryChute(rows: readonly Row[]): { from: Vec2; ctrl: Vec2; to: Vec2 } {
   const row = rows[0]!;
   const exitX = highEndX(row) + downhillDirX(row) * (COIN_R - 8);
   const to: Vec2 = { x: exitX, y: plankCoinY(row, exitX) };
-  return {
-    from: { x: COIN_SLOT_CENTER.x, y: COIN_SLOT_CENTER.y + 40 },
-    ctrl: { x: COIN_SLOT_CENTER.x + 6, y: to.y - 92 },
-    to,
-  };
+  const from: Vec2 = { x: COIN_SLOT_CENTER.x, y: COIN_SLOT_CENTER.y + 40 };
+  return { from, ctrl: { x: to.x + (from.x - to.x) * 0.32, y: from.y + 6 }, to };
 }
 
 function chutePoint(rows: readonly Row[], u: number): Vec2 {

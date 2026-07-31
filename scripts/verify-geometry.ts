@@ -11,6 +11,11 @@
  * §7 の貫通チェックは「棒(板)をコインがすり抜けて見える」という
  * 発注者からの不具合報告(改訂履歴(4))の再発防止。全パワーを掃引し、
  * 飛行中の全サブフレームでコインの円が板の実体に食い込んでいないことを見る。
+ *
+ * §8 は §7 の裏返し。いまの盤面ではコインが**自分のレールを飛び越して**飛ぶので、
+ * 「エンジンが押し出して当たらなかったことにしている」だけの状態を検出できない。
+ * そこで物理を通さない理想の放物線で、自分のレールと 1 段上のレールとの
+ * 余裕を直接測る。
  */
 
 import {
@@ -21,9 +26,9 @@ import {
   COIN_R,
   DIFFICULTIES,
   FIXED_DT,
+  FLICK_RISE,
   FLICK_ZONE_PX,
   GRAVITY,
-  GROOVE_GAP,
   KNOB_R,
   KNOB_REST,
   LOGICAL_H,
@@ -44,6 +49,7 @@ import {
   buildWinPocket,
   flickDirX,
   groovePos,
+  nearGapWidth,
   onPlank,
   plankSurfaceY,
 } from '../src/game/board.ts';
@@ -136,16 +142,23 @@ for (const d of Object.values(DIFFICULTIES)) {
     `${d.label}: あたりの口が盤面に収まっている`,
     pocket.left >= BOARD_LEFT && pocket.right <= BOARD_RIGHT && pocket.y < BOARD_BOTTOM,
   );
-  // 奥の穴が存在する = 板の高い端と壁の間に、丸穴を描けるだけの隙間がある
+  // 弾く点(先端)が画面の端にある = 実機のレバーの位置
   for (const r of rows) {
-    const gapToWall =
-      r.grooveSide === 'left' ? BOARD_RIGHT - r.right : r.left - BOARD_LEFT;
+    const g = groovePos(r);
+    const toWall = r.grooveSide === 'left' ? g.x - BOARD_LEFT : BOARD_RIGHT - g.x;
     check(
-      `${d.label} 段${r.index + 1}: 高い端と壁の間に奥の穴がある`,
-      gapToWall >= COIN_R * 2,
-      `${gapToWall.toFixed(0)}px`,
+      `${d.label} 段${r.index + 1}: 弾く点が壁ぎわにある`,
+      toWall <= (BOARD_RIGHT - BOARD_LEFT) * 0.2,
+      `壁まで ${toWall.toFixed(0)}px`,
+    );
+    // 奥の穴が存在する = 先端と壁の間に、コインが落ちるだけの隙間がある
+    check(
+      `${d.label} 段${r.index + 1}: 先端と壁の間に奥の穴がある`,
+      toWall >= COIN_R * 2,
+      `${toWall.toFixed(0)}px`,
     );
   }
+  check(`${d.label}: 中央の穴が残っている`, nearGapWidth(d) >= COIN_R * 2, `${nearGapWidth(d)}px`);
 }
 
 // ---------------------------------------------------------------- 2
@@ -267,7 +280,9 @@ check('プランジャー帯が画面の 25% 以下', bandH / LOGICAL_H <= 0.25)
 check('盤面とノブが重ならない', KNOB_REST.y - KNOB_R >= BOARD_BOTTOM);
 check('指のストロークが画面内に収まる', LOGICAL_H - KNOB_REST.y >= STROKE_FINGER);
 check('引ききってもノブが画面内に残る', KNOB_REST.y + STROKE_KNOB + KNOB_R <= LOGICAL_H);
-check('弾きゾーンが手前の穴より狭い', FLICK_ZONE_PX < GROOVE_GAP);
+for (const d of Object.values(DIFFICULTIES)) {
+  check(`${d.label}: 弾きゾーンが中央の穴より狭い`, FLICK_ZONE_PX < nearGapWidth(d));
+}
 console.log(`  重力=${GRAVITY} 段間=${ROW_GAP} 弾き力=${P_MIN}..${P_MAX}`);
 
 // ---------------------------------------------------------------- 7
@@ -315,6 +330,60 @@ for (const d of Object.values(DIFFICULTIES)) {
   check(
     `${d.label}: 飛行中のコインが板にめり込まない(最大 ${worstDepth.toFixed(1)}px)`,
     worstDepth <= 4,
+    worstAt,
+  );
+}
+
+// ---------------------------------------------------------------- 8
+console.log('\n=== 8. 弾道が自分のレールと 1 段上のレールを避けること ===');
+
+/**
+ * コインの円がレールの実体にどれだけ食い込むか。物理エンジンを通さず、
+ * 理想の放物線で測る。エンジン側の押し出しに隠されると
+ * 「当たっているのに検算は通る」ことが起きるため。
+ */
+function overlapWithPlank(row: Row, cx: number, cy: number): number {
+  const qx = Math.max(row.left, Math.min(row.right, cx));
+  const top = plankSurfaceY(row, qx);
+  const qy = Math.max(top, Math.min(top + PLANK_THICK, cy));
+  return COIN_R - Math.hypot(cx - qx, cy - qy);
+}
+
+for (const d of Object.values(DIFFICULTIES)) {
+  const rows = buildRows(d);
+  const pocket = buildWinPocket(d);
+  let worst = -Infinity;
+  let worstAt = '';
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const row = rows[i]!;
+    const from = groovePos(row);
+    const dir = flickDirX(row);
+    const targetY = i + 1 < ROW_COUNT ? rows[i + 1]!.grooveY : pocket.y;
+    for (let power = P_MIN; power <= P_MAX; power += 5) {
+      const vx = dir * power * Math.cos(FLICK_RISE);
+      const vy = -power * Math.sin(FLICK_RISE);
+      for (let t = 0.004; t < 3; t += 0.004) {
+        const cx = from.x + vx * t;
+        const cy = from.y + vy * t + 0.5 * GRAVITY * t * t;
+        if (cy > targetY - COIN_R) break; // 着地レベルに到達。ここから先は着地判定の領域
+        if (cx < BOARD_LEFT + COIN_R || cx > BOARD_RIGHT - COIN_R) break;
+        // 発射の瞬間はコインが自分のレールに接している。そこは判定から外す
+        if (Math.abs(cx - from.x) < COIN_R) continue;
+        for (const other of rows) {
+          if (other.index > i) continue; // 下の段は着地先。避ける対象ではない
+          const o = overlapWithPlank(other, cx, cy);
+          if (o > worst) {
+            worst = o;
+            worstAt = `段${i + 1}→段${other.index + 1} power=${power} pos=(${cx.toFixed(0)},${cy.toFixed(0)})`;
+          }
+        }
+      }
+    }
+  }
+  check(
+    `${d.label}: 飛び出したコインが自分と上のレールに当たらない(余裕 ${(-worst).toFixed(1)}px)`,
+    // ぎりぎり 0 では調整のたびに崩れる。コイン半径の半分は空けておく
+    worst < -COIN_R / 2,
     worstAt,
   );
 }

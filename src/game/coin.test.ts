@@ -5,9 +5,10 @@
  * 成功域の広さと、強すぎ・弱すぎの両方で落ちることを直接テストしている。
  * ここが壊れると盤面の数字が正しくても遊べなくなる。
  *
- * 加えて「コインが板を貫通しない」ことをテストする。旧設計は
- * 弾いたコインが自分の板を横切る幾何で、どんな弾道でも板にめり込んで
- * 見える欠陥があった(改訂履歴(4))。
+ * 加えて「コインが板を貫通しない」ことをテストする。いまの盤面は
+ * 弾く点が壁ぎわにあり、コインは**自分のレールを飛び越して**飛ぶので、
+ * 「レールの上を通り抜けているように見える」不具合(改訂履歴(4))が
+ * 再発しやすい。飛行中にレールへめり込まないことを全パワーで確かめる。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -19,7 +20,6 @@ import {
   DIFFICULTIES,
   FIXED_DT,
   FLICK_ZONE_PX,
-  GROOVE_GAP,
   P_MAX,
   P_MIN,
   PLANK_THICK,
@@ -34,6 +34,8 @@ import {
   buildWinPocket,
   flickDirX,
   groovePos,
+  highEndX,
+  nearGapWidth,
   onPlank,
   plankSurfaceY,
 } from './board.ts';
@@ -101,19 +103,33 @@ describe('盤面の幾何', () => {
     }
   });
 
-  it.each([EASY, NORMAL])('$label: 溝の端が左→右と交互になる', (d) => {
+  it.each([EASY, NORMAL])('$label: 溝の端が右→左と交互になる', (d) => {
     const sides = buildRows(d).map((r) => r.grooveSide);
-    expect(sides).toEqual(['left', 'right', 'left', 'right', 'left']);
+    expect(sides).toEqual(['right', 'left', 'right', 'left', 'right']);
   });
 
-  it.each([EASY, NORMAL])('$label: 弾く向きは板から離れる向き(外向き)', (d) => {
+  // 発注者の要望:弾く点は画面中央ではなく左右の画面端にあること
+  it.each([EASY, NORMAL])('$label: 弾く点(溝)が画面の端にある', (d) => {
+    const boardW = BOARD_RIGHT - BOARD_LEFT;
+    for (const row of buildRows(d)) {
+      const g = groovePos(row);
+      const toWall = row.grooveSide === 'left' ? g.x - BOARD_LEFT : BOARD_RIGHT - g.x;
+      // 端から板の 2 割以内。かつコイン 1 枚ぶんの奥の穴は残っている
+      expect(toWall).toBeLessThanOrEqual(boardW * 0.2);
+      expect(toWall).toBeGreaterThanOrEqual(COIN_R * 2);
+    }
+  });
+
+  it.each([EASY, NORMAL])('$label: 弾く向きは壁と反対、盤面の内側', (d) => {
     for (const row of buildRows(d)) {
       const g = groovePos(row);
       const dir = flickDirX(row);
-      // 溝から弾く向きへ進むと、すぐ板の外に出る
-      expect(onPlank(row, g.x + dir * (COIN_R + 1))).toBe(false);
-      // 反対へ進むと板の上(=自分の板を横切って飛ぶことはない)
-      expect(onPlank(row, g.x - dir * (COIN_R + 1))).toBe(true);
+      // 溝から弾く向きへ進むと自分のレールの上(=これを飛び越して飛ぶ)
+      expect(onPlank(row, g.x + dir * (COIN_R + 1))).toBe(true);
+      // 反対は壁との隙間(奥の穴)
+      expect(onPlank(row, g.x - dir * (COIN_R + 1))).toBe(false);
+      // 板の高い端は盤面の内側にある
+      expect(Math.sign(highEndX(row) - g.x)).toBe(dir);
     }
   });
 
@@ -135,11 +151,11 @@ describe('盤面の幾何', () => {
   });
 
   // 手前の穴が無いと「弱すぎ」で落ちる余地が消える
-  it.each([EASY, NORMAL])('$label: 溝と 1 段下の板の間に手前の穴がある', (d) => {
+  it.each([EASY, NORMAL])('$label: 盤面の中央に手前の穴がある', (d) => {
     const rows = buildRows(d);
-    const gap = Math.abs(groovePos(rows[0]!).x - rows[1]!.right);
-    expect(gap).toBeCloseTo(GROOVE_GAP, 6);
-    expect(gap).toBeGreaterThan(COIN_R);
+    // 自分のレールの高い端から、着地するレールの高い端までが開口している
+    expect(nearGapWidth(d)).toBeCloseTo(Math.abs(highEndX(rows[0]!) - highEndX(rows[1]!)), 6);
+    expect(nearGapWidth(d)).toBeGreaterThan(COIN_R * 2);
   });
 
   it.each([EASY, NORMAL])('$label: 各段に手前と奥の両方の穴がある', (d) => {
@@ -335,9 +351,9 @@ describe('板を貫通しない', () => {
     const rows = buildRows(EASY);
     const pocket = buildWinPocket(EASY);
     const holes = buildHoles(EASY);
-    const target = rows[1]!; // 板は左へ伸び、右端が溝の先端
+    const target = rows[1]!; // 板は左端(壁ぎわ)が溝の先端で、右へ伸びる
     const c = createCoin();
-    // 先端のすぐ右、板面すれすれの高さから水平に打ち込む
+    // 高い端(盤面の内側の端)のすぐ右、板面すれすれの高さから水平に打ち込む
     c.state = 'airborne';
     c.rowIndex = 0;
     c.pos = { x: target.right + COIN_R + 40, y: target.grooveY + PLANK_THICK / 2 };

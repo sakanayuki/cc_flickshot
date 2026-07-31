@@ -2,8 +2,8 @@
  * コインの状態機械と物理。
  *
  * ルールは単純で、コインは次の 3 つのことしかしない。
- *   1. 板の上を溝に向かって転がり、先端でレバーにもたれて止まる
- *   2. レバーに外向きへ弾かれ、放物線を描いて落ちる
+ *   1. 板の上を先端(壁ぎわの溝)に向かって転がり、レバーにもたれて止まる
+ *   2. レバーに盤面の内側へ弾かれ、自分の板を飛び越して放物線を描いて落ちる
  *   3. 1 段下の板に乗る(成功)か、板を外して丸穴に落ちる(没収)
  *
  * 空中の運動は 1 サブステップの移動量が MAX_SUBSTEP_MOVE を超えないよう
@@ -23,7 +23,6 @@ import {
   FLICK_ZONE_PX,
   GRAVITY,
   MAX_SUBSTEP_MOVE,
-  PLANK_LIP,
   PLANK_THICK,
   ROLL_DAMPING,
   ROW_COUNT,
@@ -191,11 +190,12 @@ function stepOnPlank(coin: Coin, dt: number, rows: readonly Row[]): StepResult {
     coin.x = groove.x;
     coin.vx = 0;
   }
-  // 高い端の返し(ストッパー)。勢いよく戻ってもここで止まり、転がり出ない
-  const stop = highEndX(row) + dir * (COIN_R - 8);
+  // 高い端。コインは着地したあと必ず先端側へ転がるので、ここへ戻ることは
+  // 無いが、着地直後の 1 フレームだけ端からはみ出さないよう押さえておく
+  const stop = highEndX(row) + dir * 4;
   if ((dir > 0 && coin.x < stop) || (dir < 0 && coin.x > stop)) {
     coin.x = stop;
-    coin.vx = 0;
+    if (coin.vx * dir < 0) coin.vx = 0;
   }
 
   syncPos(coin, rows);
@@ -203,16 +203,14 @@ function stepOnPlank(coin: Coin, dt: number, rows: readonly Row[]): StepResult {
 }
 
 /**
- * 板の端面(+高い端の返し)との衝突。
+ * 板の端面との衝突。
  * コインの円と、板の端の縦の線分との最近接距離で判定し、
  * めり込みぶんだけ水平に押し出して水平速度を殺す(跳ね返さない)。
  */
 function collidePlankEnd(coin: Coin, row: Row, endX: number, outward: number): boolean {
   const p = coin.pos;
-  // 端面の縦の範囲。高い端は返しのぶん上まで伸びる
-  const isHighEnd = endX === highEndX(row);
   const surface = plankSurfaceY(row, endX);
-  const top = surface - (isHighEnd ? PLANK_LIP : 0);
+  const top = surface;
   const bottom = surface + PLANK_THICK;
 
   // コインの下端が板面より上にあるなら、まだ触れていない。

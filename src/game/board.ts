@@ -1,19 +1,23 @@
 /**
- * 盤面の幾何。ジグザグに並ぶレール(板)と、丸い落とし穴と、あたりの口。
+ * 盤面の幾何。左右の端を行き来するレール(板)と、丸い落とし穴と、あたりの口。
  *
- * レイアウト(上から見て):
+ * レイアウト(上から見て。実機の写真と同じ並び):
  *
- *        [投入口]
- *   段1:        溝|=====板=====      ← 溝 x=420、板は右へ。左へ弾く
- *   段2:  ====板====|溝             ← 溝 x=300、板は左へ。右へ弾く
- *   段3:        溝|=====板=====
- *   段4:  ====板====|溝
- *   段5:        溝|=====板=====
- *   口 :  ==あたりの口==            ← 段5 から左へ弾いて入れる
+ *                                      [投入口]
+ *   段1:            ○ ○      ====レール====●|  ← 先端は右端。左へ弾く
+ *   段2:  |●====レール====      ○ ○           ← 先端は左端。右へ弾く
+ *   段3:            ○ ○      ====レール====●|
+ *   段4:  |●====レール====      ○ ○
+ *   段5:            ○ ○      ====レール====●|
+ *   口 :  |==あたりの口==
  *
- * すべての溝は中央の隙間(GROOVE_GAP)を挟んで向かい合い、
- * 弾かれたコインはこの隙間(=手前の丸穴)を飛び越えて 1 段下の板に乗る。
- * 板を飛び越すと壁ぎわの奥の丸穴に落ちる。
+ *   ● = 溝(コインが止まる先端)。すぐ横の壁にレバーが付く
+ *   ○ = 丸い落とし穴(アウト)
+ *   |  = 先端と壁の隙間(TIP_INSET)。ここも丸い落とし穴になっている
+ *
+ * コインは先端で止まり、**盤面の内側へ**弾かれる。自分のレールを飛び越して
+ * 中央の穴の上を飛び、反対側の端にある 1 段下のレールに着地する。
+ * 弱すぎれば中央の穴、強すぎれば飛び越した先の壁ぎわの穴に落ちる。
  *
  * このモジュールは Canvas も DOM も参照しない。
  */
@@ -22,12 +26,12 @@ import {
   BOARD_LEFT,
   BOARD_RIGHT,
   COIN_R,
-  GROOVE_EVEN_X,
-  GROOVE_ODD_X,
   PLANK_DROP,
   ROW_COUNT,
   ROW_GAP,
   ROW_TOP_Y,
+  TIP_LEFT_X,
+  TIP_RIGHT_X,
   type DifficultyConfig,
   type GrooveSide,
   type Row,
@@ -35,35 +39,40 @@ import {
   type WinPocket,
 } from '../config.ts';
 
+/** 段 index の先端(溝)が左右どちらの端に来るか。偶数段=右端、奇数段=左端 */
+function sideOf(index: number): GrooveSide {
+  return index % 2 === 0 ? 'right' : 'left';
+}
+
 /**
  * 段のレールを作る。
  *
- * 偶数段(index 0,2,4)は溝が板の左端(x=GROOVE_EVEN_X)で板は右へ伸び、左へ弾く。
- * 奇数段(index 1,3)は溝が板の右端(x=GROOVE_ODD_X)で板は左へ伸び、右へ弾く。
- * どの遷移も「隙間 GROOVE_GAP を飛び越えて幅 plankWidth の板に乗る」で同一条件になる。
+ * 偶数段(index 0,2,4)は先端が右端(x=TIP_RIGHT_X)でレールは左へ伸び、左へ弾く。
+ * 奇数段(index 1,3)は先端が左端(x=TIP_LEFT_X)でレールは右へ伸び、右へ弾く。
+ * どの遷移も「自分のレールを飛び越し、中央の穴を越えて、反対側の端の
+ * レールに乗る」で同一条件になる。
  */
 export function buildRows(d: DifficultyConfig): Row[] {
   const w = d.plankWidth;
   return Array.from({ length: ROW_COUNT }, (_, i): Row => {
-    const even = i % 2 === 0;
-    const side: GrooveSide = even ? 'left' : 'right';
-    const grooveX = even ? GROOVE_EVEN_X : GROOVE_ODD_X;
-    const [left, right] = even ? [grooveX, grooveX + w] : [grooveX - w, grooveX];
+    const side = sideOf(i);
+    const [left, right] =
+      side === 'right' ? [TIP_RIGHT_X - w, TIP_RIGHT_X] : [TIP_LEFT_X, TIP_LEFT_X + w];
     const grooveY = ROW_TOP_Y + i * ROW_GAP;
     return { index: i, left, right, grooveSide: side, grooveY, highY: grooveY - PLANK_DROP };
   });
 }
 
 /**
- * あたりの口。段5(溝 x=GROOVE_EVEN_X)から左へ弾いて入れる。
- * 口の幅と位置は奇数段の板とまったく同じで、6 つ目の遷移も同一条件になる。
+ * あたりの口。最下段からの 1 回ぶんの遷移がそのまま「あがり」になるよう、
+ * 位置も幅も 1 段ぶん下のレールとまったく同じに置く。
  */
 export function buildWinPocket(d: DifficultyConfig): WinPocket {
-  return {
-    left: GROOVE_ODD_X - d.plankWidth,
-    right: GROOVE_ODD_X,
-    y: ROW_TOP_Y + ROW_COUNT * ROW_GAP,
-  };
+  const w = d.plankWidth;
+  const side = sideOf(ROW_COUNT);
+  const [left, right] =
+    side === 'right' ? [TIP_RIGHT_X - w, TIP_RIGHT_X] : [TIP_LEFT_X, TIP_LEFT_X + w];
+  return { left, right, y: ROW_TOP_Y + ROW_COUNT * ROW_GAP };
 }
 
 // ---------------------------------------------------------------- 板の上の幾何
@@ -74,17 +83,20 @@ export function groovePos(row: Row): Vec2 {
   return { x, y: row.grooveY - COIN_R };
 }
 
-/** 弾き出す向き。溝の端のさらに外へ = 板から離れる向き */
+/**
+ * 弾き出す向き。先端は壁ぎわにあるので、弾く向きはつねに盤面の内側
+ * (= 自分のレールを飛び越す向き)。
+ */
 export function flickDirX(row: Row): number {
-  return row.grooveSide === 'left' ? -1 : 1;
+  return row.grooveSide === 'left' ? 1 : -1;
 }
 
-/** 板が下り坂になる向き(溝へ向かう向き)。弾く向きと同じ */
+/** 板が下り坂になる向き(先端へ向かう向き)。弾く向きとは逆 */
 export function downhillDirX(row: Row): number {
-  return flickDirX(row);
+  return -flickDirX(row);
 }
 
-/** 板の高い端の x(溝の反対側) */
+/** 板の高い端の x(先端の反対側 = 盤面の内側の端) */
 export function highEndX(row: Row): number {
   return row.grooveSide === 'left' ? row.right : row.left;
 }
@@ -113,6 +125,15 @@ export function inWinPocket(pocket: WinPocket, x: number): boolean {
   return x >= pocket.left + 4 && x <= pocket.right - 4;
 }
 
+/**
+ * 中央の穴(手前の穴)の幅。
+ * 自分のレールの高い端から、着地するレールの高い端までの距離。
+ */
+export function nearGapWidth(d: DifficultyConfig): number {
+  const rows = buildRows(d);
+  return Math.abs(highEndX(rows[0]!) - highEndX(rows[1]!));
+}
+
 // ---------------------------------------------------------------- 穴
 
 /** 丸い落とし穴。着地に失敗するとここへ落ちる */
@@ -124,9 +145,9 @@ export interface Hole {
   right: number;
   /** 落下レベルの y(その段の板面の高さ) */
   y: number;
-  /** 溝から見て手前(弱すぎ)側か、奥(強すぎ)側か */
+  /** 弾いた先端から見て手前(弱すぎ)側か、飛び越した先(強すぎ)側か */
   kind: 'near' | 'far';
-  /** 穴の見た目の中心と半径。落下範囲いっぱいに開口させるので楕円になる */
+  /** 穴の見た目の中心と半径 */
   cx: number;
   cy: number;
   rx: number;
@@ -134,10 +155,19 @@ export interface Hole {
 }
 
 /**
+ * 中央の穴は実機の写真と同じく「丸い穴が並んでいる」見た目にする。
+ * 落ちる範囲は隙間まるごとなので、丸を並べて隙間を隙間なく埋める。
+ * 1 つあたりがこの幅に近くなるよう個数を決めると、どの難易度でも丸く見える。
+ */
+const NEAR_HOLE_PITCH = 72;
+
+/**
  * すべての穴を作る。
  *
- * 手前の穴: 中央の隙間(GROOVE_GAP)。弱すぎたコインが落ちる。全遷移で共通。
- * 奥の穴: 着地する板の高い端と壁の間。強すぎたコインが落ちる。
+ * 手前の穴: 自分のレールの高い端と、着地するレールの高い端の間。
+ *           弱すぎたコインが落ちる。盤面の中央にあり、全遷移で共通。
+ * 奥の穴  : 着地するレールの先端と、その先の壁の間(TIP_INSET)。
+ *           強すぎて飛び越しすぎたコインが落ちる。
  * 両方が必ず存在する(片方しか無いと片側だけのゲームになる)。
  */
 export function buildHoles(d: DifficultyConfig): Hole[] {
@@ -150,44 +180,51 @@ export function buildHoles(d: DifficultyConfig): Hole[] {
     const target = isPocket
       ? { left: pocket.left, right: pocket.right, y: pocket.y }
       : { left: rows[level]!.left, right: rows[level]!.right, y: rows[level]!.grooveY };
+    const source = rows[level - 1]!;
     // 1 つ上の段からどちらへ弾かれてくるか
-    const goingLeft = flickDirX(rows[level - 1]!) < 0;
+    const goingLeft = flickDirX(source) < 0;
 
-    const near = { left: GROOVE_ODD_X, right: GROOVE_EVEN_X, kind: 'near' as const };
+    // 手前(中央)の穴: 弾いた側のレールの高い端 〜 着地するレールの高い端
+    const near = goingLeft
+      ? { left: target.right, right: source.left }
+      : { left: source.right, right: target.left };
+    // 奥の穴: 着地するレールの先端の先、壁との隙間
     const far = goingLeft
-      ? { left: BOARD_LEFT, right: target.left, kind: 'far' as const }
-      : { left: target.right, right: BOARD_RIGHT, kind: 'far' as const };
+      ? { left: BOARD_LEFT, right: target.left }
+      : { left: target.right, right: BOARD_RIGHT };
 
-    for (const s of [near, far]) {
-      if (s.right - s.left <= 1) continue;
-      const half = (s.right - s.left) / 2;
-      let cx = (s.left + s.right) / 2;
-      let rx: number;
-      let ry: number;
-
-      if (s.kind === 'near') {
-        // 棒と棒の間はまるごと開口している。落ちる範囲と見た目を一致させる
-        rx = half - 10;
-        ry = 34;
-      } else {
-        // 奥の穴は「棒の端のすぐ先」に寄せた丸穴(実機と同じ)
-        rx = Math.max(Math.min(half - 8, 46), 18);
-        ry = rx * 0.66;
-        cx = goingLeft ? Math.min(cx, s.right - rx - 6) : Math.max(cx, s.left + rx + 6);
-      }
-
+    // 中央の穴は丸を並べて開口を埋める。写真と同じ見た目になる
+    const span = near.right - near.left;
+    const count = Math.max(2, Math.round(span / NEAR_HOLE_PITCH));
+    const step = span / count;
+    for (let k = 0; k < count; k++) {
+      const l = near.left + step * k;
+      const rx = step / 2;
       holes.push({
         rowIndex: level,
-        left: s.left,
-        right: s.right,
+        left: l,
+        right: l + step,
         y: target.y,
-        kind: s.kind,
-        cx,
+        kind: 'near',
+        cx: l + rx,
         cy: target.y + 4,
         rx,
-        ry,
+        ry: Math.min(30, rx * 0.8),
       });
     }
+
+    const farHalf = (far.right - far.left) / 2;
+    holes.push({
+      rowIndex: level,
+      left: far.left,
+      right: far.right,
+      y: target.y,
+      kind: 'far',
+      cx: (far.left + far.right) / 2,
+      cy: target.y + 4,
+      rx: farHalf,
+      ry: Math.min(30, farHalf * 0.72),
+    });
   }
   return holes;
 }
