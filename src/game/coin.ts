@@ -1,140 +1,163 @@
 /**
  * コインの状態機械と物理。
  *
- * **コインは飛ばない。レーンの上を走る。**
- * 位置はレーンに沿った距離 `s` ひとつ、速度は前向きの速さ `v` ひとつだけ。
- * 放物線も 2 次元の当たり判定も無い。
+ * 重力は画面の下向きに働く。コインの動きは 2 つだけ。
  *
- *   1. 止まり木(レバー)に受け止められて止まっている
- *   2. 弾かれて勢いを得る。レーンを走りながら摩擦で減速していく
- *   3. 穴を勢いよく渡りきり、次の止まり木に受け止められる(成功)か、
- *      勢いが足りずに穴へ落ちる / 勢いが強すぎて止まり木を乗り越えて
- *      その先の穴へ落ちる(没収)
+ *   1. `onLane` — ななめ上向きのレーンの上。斜面に沿った 1 次元の運動。
+ *      加速度は斜面成分の `-GRAVITY * sinθ` だけ(摩擦なし)。
+ *      弾かれると登り、減速し、止まって、また滑り降りてくる。
+ *   2. `dropping` — 隙間から落ちて 1 段下のレーンへ向かう自由落下。
+ *      画面下向きの重力そのままの放物線で、次のレーンに着地する。
  *
- * 減速は `dv/dt = LANE_ASSIST - LANE_DRAG * v`。
- * 速い間はほぼ `v ≒ v0 - LANE_DRAG * 走った距離` の一次関数になるので、
- * 「引いた量」と「走る距離」が素直に対応する。
- * 止まりかけると LANE_ASSIST(レーンの傾き)が勝ってゆっくり前へ進み続けるので、
- * コインがレーンの途中で永久に止まって詰むことがない。
+ * 勝ち負けはレーンの上の 3 区間だけで決まる。
+ *
+ *   手前の穴を HOLE_CATCH_SPEED 未満で通る → 落ちる(**弱すぎ**)
+ *   隙間を HOLE_CATCH_SPEED 未満で通る     → 落ちる(**成功。1 段下へ**)
+ *   隙間を渡りきる                          → 奥の穴へ(**強すぎ**)
+ *
+ * 摩擦を入れていないので、登りと下りが対称になり、
+ * 「どの初速でどこまで登れるか」が閉じた式で決まる。
+ * チューニングも検算もその式と実物理の突き合わせで行う。
  *
  * Canvas も DOM も参照しない純粋なロジック。Vitest でそのままテストできる。
  */
 
 import {
   COIN_R,
-  ENTRY_SPEED,
+  GRAVITY,
   HOLE_CATCH_SPEED,
-  LANE_ASSIST,
-  LANE_DRAG,
   MAX_SUBSTEP_MOVE,
-  STOP_HOLD_SPEED,
+  ROW_COUNT,
   type Vec2,
 } from '../config.ts';
-import { holeAt, posAt, type Hole, type Lane } from './board.ts';
+import {
+  inFarHole,
+  inGap,
+  inNearHole,
+  laneUAtX,
+  laneYAtX,
+  posOnLane,
+  xOnLane,
+  type Lane,
+  type WinPocket,
+} from './board.ts';
 
-export type CoinState = 'onLane' | 'falling' | 'win';
+export type CoinState = 'onLane' | 'dropping' | 'lost' | 'win';
+
+/** どこで没収されたか。演出と検算で使い分ける */
+export type LostKind = 'weak' | 'strong';
 
 export interface Coin {
   state: CoinState;
-  /** レーンに沿った位置 */
-  s: number;
-  /** レーンに沿った速さ。つねに 0 以上(後戻りしない) */
+  /** いま乗っている(または向かっている)レーン */
+  laneIndex: number;
+  /** onLane: 斜面に沿った位置。低い端が 0 */
+  u: number;
+  /** onLane: 斜面に沿った速さ。登りが + */
   v: number;
-  /** 止まり木に受け止められて静止しているか。true のときだけ弾ける */
+  /** レバーに受け止められて静止しているか。true のときだけ弾ける */
   held: boolean;
-  /** 直近で受け止められた止まり木。-1 は投入直後 */
-  stopIndex: number;
   /** コインの中心。常に有効 */
   pos: Vec2;
-  /** falling / win の演出経過秒 */
+  /** dropping のときの速度 */
+  vel: Vec2;
+  /** lost / win の演出経過秒 */
   timer: number;
-  /** falling のとき、落ちた穴 */
-  hole: Hole | null;
-  /** falling に入った瞬間の位置(落下演出の始点) */
-  fallFrom: Vec2;
+  /** lost のとき、どちら側で落ちたか */
+  lostKind: LostKind | null;
+  /** 落ちた穴の中心(演出の吸い込み先) */
+  lostAt: Vec2;
   /** 見た目の回転 */
   spin: number;
 }
 
 export interface StepResult {
-  /** このステップで受け止められた止まり木 */
-  heldAtStop: number | null;
-  /** 穴に落ちた */
-  fellInHole: Hole | null;
-  /** 落ちかたが「弱すぎ」か「強すぎ」か */
-  fellKind: 'weak' | 'strong' | null;
+  /** このステップでレバーに受け止められたレーン */
+  heldOnLane: number | null;
+  /** 隙間から落ちて次の段へ向かい始めた */
+  droppedThrough: boolean;
+  /** 1 段下のレーンに着地した */
+  landedOnLane: number | null;
+  /** 穴に落ちて没収 */
+  lost: LostKind | null;
   /** あたりの口に入った */
   reachedWin: boolean;
-  /** 止まり木を乗り越えてしまった位置(火花演出用) */
-  overran: Vec2 | null;
 }
 
 const EMPTY = (): StepResult => ({
-  heldAtStop: null,
-  fellInHole: null,
-  fellKind: null,
+  heldOnLane: null,
+  droppedThrough: false,
+  landedOnLane: null,
+  lost: null,
   reachedWin: false,
-  overran: null,
 });
 
 export function createCoin(): Coin {
   return {
     state: 'onLane',
-    s: 0,
+    laneIndex: 0,
+    u: 0,
     v: 0,
     held: false,
-    stopIndex: -1,
     pos: { x: 0, y: 0 },
+    vel: { x: 0, y: 0 },
     timer: 0,
-    hole: null,
-    fallFrom: { x: 0, y: 0 },
+    lostKind: null,
+    lostAt: { x: 0, y: 0 },
     spin: 0,
   };
 }
 
-function syncPos(coin: Coin, lane: Lane): void {
-  coin.pos = posAt(lane, coin.s);
+function syncPos(coin: Coin, lanes: readonly Lane[]): void {
+  coin.pos = posOnLane(lanes[coin.laneIndex]!, coin.u);
 }
 
-/** 指定した位置・速さでレーンに置く */
-export function placeOnLane(coin: Coin, lane: Lane, s: number, v: number): void {
+/** 指定したレーンの指定した位置に置く */
+export function placeOnLane(
+  coin: Coin,
+  lanes: readonly Lane[],
+  laneIndex: number,
+  u: number,
+  v: number,
+): void {
   coin.state = 'onLane';
-  coin.s = s;
+  coin.laneIndex = laneIndex;
+  coin.u = u;
   coin.v = v;
-  coin.held = v === 0;
+  coin.held = v === 0 && u === 0;
   coin.timer = 0;
-  coin.hole = null;
-  syncPos(coin, lane);
+  coin.lostKind = null;
+  syncPos(coin, lanes);
 }
 
-/** 指定した止まり木に受け止められた状態にする */
-export function placeAtStop(coin: Coin, lane: Lane, stopIndex: number): void {
-  const stop = lane.stops[stopIndex]!;
-  placeOnLane(coin, lane, stop.s, 0);
+/** レバーに受け止められた状態(低い端で静止)にする */
+export function placeAtLever(coin: Coin, lanes: readonly Lane[], laneIndex: number): void {
+  placeOnLane(coin, lanes, laneIndex, 0, 0);
   coin.held = true;
-  coin.stopIndex = stopIndex;
 }
 
 /**
  * 投入されたコインの初期位置。
- * レーンの先頭に勢いよく送り出す。1 本目の走路には穴が無いので、
- * どこにも落ちずに 1 つ目の止まり木まで走って止まる。
+ * 1 段目のレーンの、手前の穴より低い側に落として滑り降りさせる。
+ * 落ちてくるコインと同じ経路をたどるので、投入だけで没収されることはない。
  */
-export function placeAtStart(coin: Coin, lane: Lane): void {
-  placeOnLane(coin, lane, 0, ENTRY_SPEED);
+export function placeAtStart(coin: Coin, lanes: readonly Lane[]): void {
+  placeOnLane(coin, lanes, 0, ENTRY_U, 0);
   coin.held = false;
-  coin.stopIndex = -1;
   coin.spin = 0;
 }
 
+/** 投入されたコインが 1 段目に乗る位置。手前の穴より必ず低い側 */
+export const ENTRY_U = 120;
+
 // ---------------------------------------------------------------- 弾く
 
-/** 止まり木に止まっているコインだけが弾ける */
+/** レバーで止まっているコインだけが弾ける */
 export function canFlick(coin: Coin): boolean {
   return coin.state === 'onLane' && coin.held;
 }
 
-/** 弾けたら true。power はレーンに沿った初速 (px/s) */
+/** 弾けたら true。power は斜面に沿った初速 (px/s) */
 export function flickCoin(coin: Coin, power: number): boolean {
   if (!canFlick(coin)) return false;
   coin.held = false;
@@ -144,96 +167,141 @@ export function flickCoin(coin: Coin, power: number): boolean {
 
 // ---------------------------------------------------------------- 更新
 
-export function stepCoin(coin: Coin, dt: number, lane: Lane): StepResult {
-  if (coin.state !== 'onLane') {
-    coin.timer += dt;
-    return EMPTY();
+export function stepCoin(
+  coin: Coin,
+  dt: number,
+  lanes: readonly Lane[],
+  pocket: WinPocket,
+): StepResult {
+  switch (coin.state) {
+    case 'onLane':
+      return coin.held ? EMPTY() : stepOnLane(coin, dt, lanes);
+    case 'dropping':
+      return stepDropping(coin, dt, lanes, pocket);
+    default:
+      coin.timer += dt;
+      return EMPTY();
   }
-  if (coin.held) return EMPTY();
-  return stepOnLane(coin, dt, lane);
 }
 
-function stepOnLane(coin: Coin, dt: number, lane: Lane): StepResult {
+/** 斜面に沿った 1 次元の運動。登りも下りも同じ式 */
+function stepOnLane(coin: Coin, dt: number, lanes: readonly Lane[]): StepResult {
   const res = EMPTY();
+  const lane = lanes[coin.laneIndex]!;
 
-  // 1 サブステップの移動量が MAX_SUBSTEP_MOVE を超えないよう分割する。
-  // 高速のときに穴や止まり木をまたいで見落とさないため
-  const steps = Math.min(24, Math.max(1, Math.ceil((coin.v * dt) / MAX_SUBSTEP_MOVE)));
+  const steps = Math.min(24, Math.max(1, Math.ceil((Math.abs(coin.v) * dt) / MAX_SUBSTEP_MOVE)));
   const h = dt / steps;
 
   for (let i = 0; i < steps; i++) {
-    const prevS = coin.s;
-    coin.v += (LANE_ASSIST - LANE_DRAG * coin.v) * h;
-    coin.s += coin.v * h;
+    coin.v -= lane.decel * h; // 斜面に沿った重力。つねに低い端の向き
+    coin.u += coin.v * h;
     coin.spin += (coin.v * h) / COIN_R;
 
-    // 止まり木。またいだ瞬間に、受け止められるか乗り越えるかが決まる
-    for (const stop of lane.stops) {
-      if (prevS >= stop.s || coin.s < stop.s) continue;
-      if (coin.v <= STOP_HOLD_SPEED) {
-        coin.s = stop.s;
-        coin.v = 0;
-        coin.held = true;
-        coin.stopIndex = stop.index;
-        syncPos(coin, lane);
-        res.heldAtStop = stop.index;
-        return res;
+    // 穴と隙間。ゆっくり通ると落ちる。勢いがあれば口をかすめて渡れる
+    if (Math.abs(coin.v) < HOLE_CATCH_SPEED) {
+      if (inGap(lane, coin.u)) {
+        syncPos(coin, lanes);
+        return dropThrough(coin, res);
       }
-      // 勢いが強すぎる。乗り越えてそのまま先の穴へ向かう
-      res.overran = { ...stop.pos };
+      if (inNearHole(lane, coin.u)) return lose(coin, lanes, res, 'weak');
+      if (inFarHole(lane, coin.u)) return lose(coin, lanes, res, 'strong');
     }
+    // 高い端を越えたら、そのまま奥の穴と同じ扱い
+    if (coin.u > lane.length) return lose(coin, lanes, res, 'strong');
 
-    // あたりの口。止まり木と同じで、受け止められる速さで来る必要がある
-    if (prevS < lane.goalS && coin.s >= lane.goalS && coin.v <= STOP_HOLD_SPEED) {
-      coin.s = lane.goalS;
+    // 低い端のレバーで受け止める
+    if (coin.u <= 0) {
+      coin.u = 0;
       coin.v = 0;
-      coin.state = 'win';
-      coin.timer = 0;
-      syncPos(coin, lane);
-      res.reachedWin = true;
+      coin.held = true;
+      syncPos(coin, lanes);
+      res.heldOnLane = lane.index;
       return res;
-    }
-
-    // 穴。勢いが足りないまま口の上に来ると落ちる
-    const hole = holeAt(lane, coin.s);
-    if (hole && coin.v < HOLE_CATCH_SPEED) {
-      syncPos(coin, lane);
-      return fall(coin, hole, res);
-    }
-
-    // レーンの終端。通り過ぎたら最後の穴へ落とす
-    if (coin.s >= lane.length) {
-      coin.s = lane.length;
-      syncPos(coin, lane);
-      return fall(coin, lane.holes[lane.holes.length - 1]!, res);
     }
   }
 
-  syncPos(coin, lane);
+  syncPos(coin, lanes);
   return res;
 }
 
-/**
- * 穴に落ちる。
- *
- * 穴 i は止まり木 i と i+1 のあいだにある。止まり木 k から弾いたコインが
- * 渡るべき穴は k なので、
- *   穴 k に落ちた   → 渡りきれなかった = 弱すぎ
- *   穴 k+1 以降     → 止まり木 k+1 を乗り越えている = 強すぎ
- */
-function fall(coin: Coin, hole: Hole, res: StepResult): StepResult {
-  coin.state = 'falling';
+/** 隙間から落ちる。ここから 1 段下のレーンへ向かう自由落下になる */
+function dropThrough(coin: Coin, res: StepResult): StepResult {
+  coin.state = 'dropping';
+  // 斜面に沿っていた速度をそのまま画面座標へ移す
+  coin.vel = { x: 0, y: 0 };
+  res.droppedThrough = true;
+  return res;
+}
+
+/** 穴に落ちて没収 */
+function lose(coin: Coin, lanes: readonly Lane[], res: StepResult, kind: LostKind): StepResult {
+  const lane = lanes[coin.laneIndex]!;
+  const span = kind === 'weak' ? lane.nearHole : lane.farHole;
+  const mid = Math.min(Math.max(coin.u, span.from), span.to);
+  syncPos(coin, lanes);
+  coin.state = 'lost';
   coin.timer = 0;
-  coin.hole = hole;
-  coin.fallFrom = { ...coin.pos };
-  res.fellInHole = hole;
-  res.fellKind = hole.index <= coin.stopIndex ? 'weak' : 'strong';
+  coin.lostKind = kind;
+  coin.lostAt = posOnLane(lane, mid);
+  coin.v = 0;
+  res.lost = kind;
   return res;
 }
 
-/** いまコインがいる走路の番号(0 起点)。到達段数の表示に使う */
-export function runIndexOf(lane: Lane, s: number): number {
-  let idx = 0;
-  for (const run of lane.runs) if (s >= run.startS) idx = run.index;
-  return idx;
+/** 画面下向きの重力そのままの自由落下。1 段下のレーンかあたりの口で受ける */
+function stepDropping(
+  coin: Coin,
+  dt: number,
+  lanes: readonly Lane[],
+  pocket: WinPocket,
+): StepResult {
+  const res = EMPTY();
+  const target = coin.laneIndex + 1;
+  const isPocket = target >= ROW_COUNT;
+
+  const steps = Math.min(
+    24,
+    Math.max(1, Math.ceil((Math.abs(coin.vel.y + GRAVITY * dt) * dt) / MAX_SUBSTEP_MOVE)),
+  );
+  const h = dt / steps;
+
+  for (let i = 0; i < steps; i++) {
+    coin.vel.y += GRAVITY * h;
+    coin.pos.x += coin.vel.x * h;
+    coin.pos.y += coin.vel.y * h;
+    coin.spin += (coin.vel.x * h) / COIN_R;
+
+    if (isPocket) {
+      if (coin.pos.y >= pocket.y) {
+        coin.pos.y = pocket.y;
+        coin.vel = { x: 0, y: 0 };
+        coin.state = 'win';
+        coin.timer = 0;
+        res.reachedWin = true;
+        return res;
+      }
+      continue;
+    }
+
+    const lane = lanes[target]!;
+    if (!xOnLane(lane, coin.pos.x)) continue;
+    const surface = laneYAtX(lane, coin.pos.x);
+    if (coin.pos.y >= surface) {
+      // 着地。斜面に沿った成分だけを引き継ぐ(低い端へ滑り出す)
+      coin.laneIndex = target;
+      coin.u = laneUAtX(lane, coin.pos.x);
+      coin.v = coin.vel.x * lane.dir.x + coin.vel.y * lane.dir.y;
+      coin.state = 'onLane';
+      coin.held = false;
+      syncPos(coin, lanes);
+      res.landedOnLane = target;
+      return res;
+    }
+  }
+  return res;
+}
+
+/** いまコインがいる段(1 起点)。到達段数の表示に使う */
+export function depthOf(coin: Coin): number {
+  return coin.laneIndex + 1;
 }
