@@ -1,5 +1,5 @@
 /**
- * 起動、シーンマシン、メインループ。詳細設計書 §1.2。
+ * 起動、シーンマシン、メインループ。
  */
 
 import { COLORS, FIXED_DT, MAX_FRAME_TIME } from './config.ts';
@@ -20,7 +20,7 @@ function showFatal(message: string): void {
   const el = document.createElement('div');
   el.setAttribute(
     'style',
-    'position:fixed;inset:0;padding:24px;background:#FFF8EC;color:#3B2A1A;' +
+    'position:fixed;inset:0;padding:24px;background:#0B0D12;color:#E9EEF7;' +
       'font:16px/1.6 system-ui,sans-serif;overflow:auto;white-space:pre-wrap;z-index:9999',
   );
   el.textContent = 'ゲームを開始できませんでした。\n\n' + message;
@@ -92,7 +92,7 @@ canvas.addEventListener('pointerup', (ev) => {
   if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
 });
 canvas.addEventListener('pointercancel', (ev) => {
-  // 発射扱いにする。詳細設計書 §6.1
+  // 発射扱いにする(iOS のシステムジェスチャに割り込まれても操作を無かったことにしない)
   forward('cancel', ev);
   if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
 });
@@ -133,7 +133,7 @@ function frame(nowMs: number): void {
   }
 
   try {
-    clearFull(ctx!, viewport, COLORS.sky);
+    clearFull(ctx!, viewport, COLORS.room);
     applyTransform(ctx!, viewport);
     current.render(ctx!);
   } catch (err) {

@@ -1,9 +1,18 @@
 /**
- * プランジャーのテスト。詳細設計書 §12.2。
+ * プランジャーのテスト。
  */
 
 import { describe, expect, it } from 'vitest';
-import { FIXED_DT, GRAB_ZONE, KNOB_REST, P_MAX, P_MIN, STROKE_FINGER, STROKE_KNOB } from '../config.ts';
+import {
+  FIXED_DT,
+  GRAB_ZONE,
+  KNOB_REST,
+  P_MAX,
+  P_MIN,
+  PULL_DEADZONE,
+  STROKE_FINGER,
+  STROKE_KNOB,
+} from '../config.ts';
 import {
   createPlunger,
   plungerPointerDown,
@@ -15,7 +24,7 @@ import {
 
 const INSIDE = { x: GRAB_ZONE.x + 10, y: GRAB_ZONE.y + 10 };
 
-describe('pull → power (§13.1)', () => {
+describe('pull → power ', () => {
   it('pull = 0 で P_MIN', () => expect(pullToPower(0)).toBe(P_MIN));
   it('pull = 1 で P_MAX', () => expect(pullToPower(1)).toBe(P_MAX));
   it('pull = 0.5 で中間', () => expect(pullToPower(0.5)).toBe((P_MIN + P_MAX) / 2));
@@ -55,7 +64,7 @@ describe('プランジャーの入力', () => {
     expect(st.pull).toBe(0);
   });
 
-  // 3歳児のドラッグは必ず蛇行する。横ブレを無視することが要件のひとつ
+  // ドラッグは必ず蛇行する。横ブレを無視することが要件のひとつ
   it('横に大きくブレても pull は縦の変位だけで決まる', () => {
     const st = createPlunger();
     plungerPointerDown(st, INSIDE, 1);
@@ -66,14 +75,14 @@ describe('プランジャーの入力', () => {
   it('引き量が極小なら発射しない(誤タップ対策)', () => {
     const st = createPlunger();
     plungerPointerDown(st, INSIDE, 1);
-    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * 0.04 });
+    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * PULL_DEADZONE * 0.5 });
     expect(plungerPointerUp(st)).toBeNull();
   });
 
   it('デッドゾーンぎりぎりなら発射する', () => {
     const st = createPlunger();
     plungerPointerDown(st, INSIDE, 1);
-    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * 0.05 });
+    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * PULL_DEADZONE });
     const power = plungerPointerUp(st);
     expect(power).not.toBeNull();
     expect(power!).toBeGreaterThan(P_MIN);

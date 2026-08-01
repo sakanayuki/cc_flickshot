@@ -1,5 +1,5 @@
 /**
- * シーンの共通インターフェース。詳細設計書 §7.1。
+ * シーンの共通インターフェース。
  */
 
 import type { DifficultyConfig, Vec2 } from '../config.ts';
@@ -16,6 +16,10 @@ export interface ResultParams {
   difficulty: DifficultyConfig;
   /** あたり時のみ、獲得したスタンプの ANIMALS 上の index */
   newStampIndex: number | null;
+  /** 最後のショットの判定。'weak' | 'strong' | 'good' */
+  lastShot: string | null;
+  /** そのときの引き量 0..1。次に何%狙えばいいかの手がかりになる */
+  lastPull: number | null;
 }
 
 export interface GameParams {

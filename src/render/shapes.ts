@@ -1,10 +1,15 @@
 /**
- * 描画のプリミティブ。外部素材を一切使わず、すべてコードで描く。
+ * 描画のプリミティブ。外部素材(画像・音・フォント・CDN)を一切使わず、
+ * すべてコードで描く。
  */
 
 import { COLORS, LINE_W, type Rect, type Vec2 } from '../config.ts';
 
 export type Ctx = CanvasRenderingContext2D;
+
+/** 文字。日本語と英数字が混ざるので、和文の入るシステムフォントを並べる */
+export const FONT_STACK =
+  'system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif';
 
 export function circle(ctx: Ctx, cx: number, cy: number, r: number): void {
   ctx.beginPath();
@@ -79,17 +84,25 @@ export function polygon(ctx: Ctx, pts: readonly Vec2[]): void {
 export interface TextOptions {
   size: number;
   color?: string;
+  /** グラデーションなどを直接指定したいとき。color より優先する */
+  fill?: string | CanvasGradient;
   align?: CanvasTextAlign;
   baseline?: CanvasTextBaseline;
   weight?: string;
-  /** 白フチをつけて背景から浮かせる */
+  /** フチをつけて背景から浮かせる */
   outline?: number;
   outlineColor?: string;
+  /** 字間 (px)。英字の見出しを締めるのに使う */
+  tracking?: number;
 }
 
 export function text(ctx: Ctx, s: string, x: number, y: number, o: TextOptions): void {
   ctx.save();
-  ctx.font = `${o.weight ?? '800'} ${o.size}px system-ui, -apple-system, "Hiragino Maru Gothic ProN", sans-serif`;
+  ctx.font = `${o.weight ?? '800'} ${o.size}px ${FONT_STACK}`;
+  if (o.tracking) {
+    // letterSpacing はまだ全ブラウザには無いので、あれば使う程度に留める
+    (ctx as unknown as { letterSpacing?: string }).letterSpacing = `${o.tracking}px`;
+  }
   ctx.textAlign = o.align ?? 'center';
   ctx.textBaseline = o.baseline ?? 'middle';
   if (o.outline && o.outline > 0) {
@@ -98,7 +111,7 @@ export function text(ctx: Ctx, s: string, x: number, y: number, o: TextOptions):
     ctx.lineJoin = 'round';
     ctx.strokeText(s, x, y);
   }
-  ctx.fillStyle = o.color ?? COLORS.ink;
+  ctx.fillStyle = o.fill ?? o.color ?? COLORS.ink;
   ctx.fillText(s, x, y);
   ctx.restore();
 }
@@ -139,4 +152,81 @@ export function easeBack(t: number): number {
   const c = 1.70158;
   const u = t - 1;
   return u * u * ((c + 1) * u + c) + 1;
+}
+
+/** 上から下へのグラデーション */
+export function vGrad(ctx: Ctx, y0: number, y1: number, stops: [number, string][]): CanvasGradient {
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  for (const [t, c] of stops) g.addColorStop(t, c);
+  return g;
+}
+
+/** 任意方向のグラデーション */
+export function lGrad(
+  ctx: Ctx,
+  a: Vec2,
+  b: Vec2,
+  stops: [number, string][],
+): CanvasGradient {
+  const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+  for (const [t, c] of stops) g.addColorStop(t, c);
+  return g;
+}
+
+export function rGrad(
+  ctx: Ctx,
+  cx: number,
+  cy: number,
+  r0: number,
+  r1: number,
+  stops: [number, string][],
+): CanvasGradient {
+  const g = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1);
+  for (const [t, c] of stops) g.addColorStop(t, c);
+  return g;
+}
+
+/** #RRGGBB と透明度から rgba() を作る */
+export function alpha(hex: string, a: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/** 影を落として中身を描く */
+export function withShadow(
+  ctx: Ctx,
+  color: string,
+  blur: number,
+  dy: number,
+  body: () => void,
+): void {
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = blur;
+  ctx.shadowOffsetY = dy;
+  body();
+  ctx.restore();
+}
+
+/** 直前に作ったパスで切り抜いて中身を描く */
+export function withClip(ctx: Ctx, path: () => void, body: () => void): void {
+  ctx.save();
+  path();
+  ctx.clip();
+  body();
+  ctx.restore();
+}
+
+/** 小さなネジ。筐体の質感づけに使う */
+export function screw(ctx: Ctx, x: number, y: number, r: number): void {
+  circle(ctx, x, y, r);
+  paint(ctx, COLORS.screw, alpha(COLORS.ink, 0.6), 1.5);
+  circle(ctx, x, y, r * 0.55);
+  paint(ctx, alpha('#FFFFFF', 0.16), null, 0);
+  line(ctx, { x: x - r * 0.6, y: y - r * 0.2 }, { x: x + r * 0.6, y: y + r * 0.2 }, alpha(COLORS.ink, 0.7), 1.6);
+}
+
+export function pingpong(t: number): number {
+  const u = t % 2;
+  return u < 1 ? u : 2 - u;
 }

@@ -1,38 +1,48 @@
 /**
- * ゲーム画面。コインは右上から入り、ななめ上向きのレーンを登っては
- * 隙間から 1 段下へ落ちて降りていき、あたりの口を目指す。
+ * ゲーム画面。
+ *
+ * 進行の芯:
+ *   投入 → 構え → プランジャーを引いて離す → レバーが蹴る → レーンを登る →
+ *   手前の穴(弱すぎ)/ 隙間(1 段下へ)/ 奥の穴(強すぎ)
+ * を 5 回。最後の隙間があたりの口につながっている。
  */
 
 import {
+  ANIMALS,
+  BOARD_BOTTOM,
+  BOARD_TOP,
   COIN_R,
+  COIN_SLOT_CENTER,
+  COIN_SLOT_SIZE,
   COLORS,
-  DIFFICULTIES,
-  FALL_ANIM,
   GIVEUP_CANCEL_R,
   GIVEUP_CENTER,
   GIVEUP_HOLD,
-  GIVEUP_R,
-  GIVEUP_RING_DELAY,
   GUIDE_IDLE_DELAY,
   INSERT_ANIM,
-  LANE_W,
-  LAND_SQUASH_TIME,
-  LEVER_HIT_DELAY,
+  LOGICAL_W,
   ROW_COUNT,
-  WIN_ANIM,
+  ROW_GAP,
+  type AnimalKind,
   type DifficultyConfig,
   type Vec2,
 } from '../config.ts';
-import { buildLanes, buildWinPocket, type Lane, type WinPocket } from '../game/board.ts';
 import {
+  buildLanes,
+  buildWinPocket,
   ENTRY_U,
+  laneP,
+  type Lane,
+  type WinPocket,
+} from '../game/board.ts';
+import {
   canFlick,
   createCoin,
   depthOf,
   flickCoin,
-  placeAtStart,
+  resetToEntry,
   stepCoin,
-  type Coin,
+  type CoinState,
 } from '../game/coin.ts';
 import { createLevers, triggerLevers, updateLevers, type LeverState } from '../game/levers.ts';
 import {
@@ -45,392 +55,338 @@ import {
   type PlungerState,
 } from '../game/plunger.ts';
 import {
-  drawBoardFace,
-  drawBoardFrame,
-  drawCabinetBase,
-  drawCabinetLower,
-  drawCoin,
+  drawBezel,
   drawCoinSlot,
-  drawEntryChute,
-  drawGap,
-  drawGiveUpButton,
-  drawHandGuide,
-  drawHoleFront,
-  drawInsertCoin,
-  drawLane,
-  drawLaneArrows,
-  drawLever,
-  drawLeverRods,
-  drawOutHoles,
+  drawControlDeck,
+  drawDepthMarks,
+  drawGlass,
+  drawRoom,
+  drawShell,
+} from '../render/cabinet.ts';
+import {
+  drawGiveUp,
+  drawLastShot,
   drawPlunger,
-  drawSideAnimals,
-  drawSideKnobs,
-  drawWinPocket,
-} from '../render/drawings.ts';
+  drawPowerMeter,
+  drawPullGuide,
+  type ShotKind,
+  type ShotMark,
+} from '../render/hud.ts';
 import { ParticleSystem } from '../render/particles.ts';
-import { clamp01, dist, easeOut, lerp, text, type Ctx } from '../render/shapes.ts';
+import {
+  drawChute,
+  drawCoin,
+  drawEntryChute,
+  drawField,
+  drawLever,
+  drawLeverKnob,
+  drawPitLip,
+  drawPits,
+  drawRail,
+  drawWinPocket,
+} from '../render/playfield.ts';
+import { alpha, clamp01, dist, easeInOut, text, type Ctx } from '../render/shapes.ts';
 import { stampIndexFor } from '../save.ts';
 import type { GameParams, Outcome, PointerPhase, Scene, SceneContext } from './scene.ts';
 
-type GamePhase = 'insert' | 'play' | 'ending';
+type Phase = 'insert' | 'play' | 'ending';
+
+/** 過去のショットの跡をいくつまで残すか */
+const MARK_HISTORY = 8;
+/** 穴に沈む演出の長さ。coin.timer(FALL_ANIM)と揃える */
+const SINK_TIME = 0.9;
+/** 操作部のまん中の列。メーターとプランジャーのあいだ */
+const DECK_COL = 300;
 
 export class GameScene implements Scene {
-  private difficulty: DifficultyConfig = DIFFICULTIES.easy;
-  private lanes: Lane[] = buildLanes(DIFFICULTIES.easy);
-  private pocket: WinPocket = buildWinPocket(DIFFICULTIES.easy);
-
-  private phase: GamePhase = 'insert';
-  private phaseTime = 0;
-  private time = 0;
-
-  private coin: Coin = createCoin();
-  private plunger: PlungerState = createPlunger();
+  private difficulty: DifficultyConfig = { id: 'easy', label: '', tag: '', nearHoleSpan: 0 };
+  private lanes: Lane[] = [];
+  private pocket: WinPocket = { center: { x: 0, y: 0 }, w: 0, h: 0 };
+  private coin: CoinState | null = null;
   private levers: LeverState[] = createLevers();
+  private plunger: PlungerState = createPlunger();
   private particles = new ParticleSystem();
 
-  /** レバーを振ってからコインに当たるまでのわずかな間 */
-  private pendingPower: number | null = null;
-  private pendingTimer = 0;
+  private time = 0;
+  private phase: Phase = 'insert';
+  private insertT = 0;
+  private animal: AnimalKind = 'usagi';
 
-  /** 何段目まで降りたか (1..ROW_COUNT) */
-  private depth = 1;
+  private marks: ShotMark[] = [];
+  private lastShot: ShotMark | null = null;
+  /** 発射してから結果が出るまでのあいだ、その引き量を覚えておく */
+  private pendingPull: number | null = null;
+
   private outcome: Outcome | null = null;
-  private endingTimer = 0;
-
-  /** 着地のつぶれ演出の残り時間 */
-  private squashTimer = 0;
 
   private giveUpHold = 0;
-  private giveUpPointerId: number | null = null;
-  private flagWave = 0;
-  private debug = false;
+  private giveUpPointer: number | null = null;
 
-  constructor(private app: SceneContext) {
-    this.debug = new URLSearchParams(location.search).get('debug') === '1';
-  }
+  constructor(private app: SceneContext) {}
 
   enter(params: unknown): void {
     const p = params as GameParams | undefined;
-    this.difficulty = p?.difficulty ?? DIFFICULTIES[this.app.save.lastDifficulty];
+    if (p?.difficulty) this.difficulty = p.difficulty;
     this.lanes = buildLanes(this.difficulty);
-    this.pocket = buildWinPocket(this.difficulty);
-
-    this.phase = 'insert';
-    this.phaseTime = 0;
-    this.time = 0;
-    this.coin = createCoin();
-    this.plunger = createPlunger();
+    this.pocket = buildWinPocket(this.lanes);
+    this.coin = createCoin(this.lanes, this.pocket);
+    resetToEntry(this.coin);
     this.levers = createLevers();
+    this.plunger = createPlunger();
     this.particles.clear();
-    this.pendingPower = null;
-    this.pendingTimer = 0;
-    this.depth = 1;
+    this.time = 0;
+    this.phase = 'insert';
+    this.insertT = 0;
+    this.marks = [];
+    this.lastShot = null;
+    this.pendingPull = null;
     this.outcome = null;
-    this.endingTimer = 0;
-    this.squashTimer = 0;
     this.giveUpHold = 0;
-    this.giveUpPointerId = null;
-    this.flagWave = 0;
+    this.giveUpPointer = null;
+    // 次にもらえるスタンプのどうぶつを、そのままコインの意匠にする
+    this.animal = ANIMALS[stampIndexFor(this.app.save.stampCount + 1)]!;
   }
 
   exit(): void {
     releasePlunger(this.plunger);
-    this.particles.clear();
   }
 
-  // ------------------------------------------------------------ 更新
+  // ---------------------------------------------------------------- 更新
 
   update(dt: number): void {
     this.time += dt;
-    this.phaseTime += dt;
-    this.flagWave += dt;
-    updatePlunger(this.plunger, dt);
     this.particles.update(dt);
+    updatePlunger(this.plunger, dt);
+    updateLevers(this.levers, dt, this.plunger.grabbed ? this.plunger.pull : 0);
 
-    switch (this.phase) {
-      case 'insert':
-        if (this.phaseTime >= INSERT_ANIM) {
-          placeAtStart(this.coin, this.lanes);
-          this.phase = 'play';
-          this.phaseTime = 0;
-        }
-        break;
-      case 'play':
-        this.updatePlay(dt);
-        break;
-      case 'ending':
-        this.stepCoinWithEffects(dt);
-        updateLevers(this.levers, dt, 0);
-        this.endingTimer -= dt;
-        if (this.endingTimer <= 0) this.finish();
-        break;
-    }
-  }
-
-  private updatePlay(dt: number): void {
-    const st = this.plunger;
-
-    if (this.giveUpPointerId !== null) {
+    if (this.giveUpPointer !== null) {
       this.giveUpHold += dt;
       if (this.giveUpHold >= GIVEUP_HOLD) {
-        this.giveUpPointerId = null;
-        this.beginEnding('giveup');
+        this.giveUpPointer = null;
+        this.finish('giveup');
         return;
       }
     }
 
-    updateLevers(this.levers, dt, st.grabbed ? st.pull : st.visualPull);
-
-    // レバーが振り上がった瞬間にコインを弾く
-    if (this.pendingPower !== null) {
-      this.pendingTimer -= dt;
-      if (this.pendingTimer <= 0) {
-        const power = this.pendingPower;
-        this.pendingPower = null;
-        if (flickCoin(this.coin, power)) {
-          this.particles.emitStars({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R * 0.6 }, 5);
-        }
-      }
+    if (this.phase === 'insert') {
+      this.insertT += dt;
+      if (this.insertT >= INSERT_ANIM) this.phase = 'play';
+      return;
     }
 
-    this.stepCoinWithEffects(dt);
+    const coin = this.coin;
+    if (!coin) return;
+
+    const r = stepCoin(coin, dt);
+
+    if (r.droppedThrough) this.record('good');
+    else if (r.lost) this.record(r.lost === 'weak' ? 'weak' : 'strong');
+    else if (r.becameReady) this.pendingPull = null;
+
+    if (r.landed) this.particles.emitPuff(coin.pos, 7);
+    if (r.lost) this.particles.emitPuff(coin.pos, 5);
+    if (r.won) {
+      this.particles.emitConfetti(
+        { x: this.pocket.center.x, y: this.pocket.center.y - 80 },
+        60,
+        220,
+      );
+    }
+
+    if (this.phase === 'play' && (r.lost || r.won)) {
+      this.phase = 'ending';
+      this.outcome = r.won ? 'win' : 'hole';
+    }
+    if (this.phase === 'ending' && r.finished) this.finish(this.outcome ?? 'hole');
   }
 
-  private stepCoinWithEffects(dt: number): void {
-    if (this.squashTimer > 0) this.squashTimer = Math.max(0, this.squashTimer - dt);
-
-    const r = stepCoin(this.coin, dt, this.lanes, this.pocket);
-
-    this.depth = Math.max(this.depth, depthOf(this.coin));
-    if (r.landedOnLane !== null) {
-      this.squashTimer = LAND_SQUASH_TIME;
-      this.particles.emitPuff({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R });
-    }
-    if (r.droppedThrough) {
-      this.particles.emitStars({ x: this.coin.pos.x, y: this.coin.pos.y }, 5, '#B6F0C2');
-    }
-    if (this.phase !== 'ending') {
-      if (r.lost) {
-        this.particles.emitPuff({ x: this.coin.pos.x, y: this.coin.pos.y + COIN_R * 0.5 }, 4);
-        this.beginEnding('hole');
-        return;
-      }
-      if (r.reachedWin) {
-        this.depth = ROW_COUNT;
-        this.particles.emitConfetti({ x: this.coin.pos.x, y: this.coin.pos.y - 120 }, 26, 240);
-        this.particles.emitStars(this.coin.pos, 8, '#FFF3B0');
-        this.beginEnding('win');
-      }
-    }
+  private record(kind: ShotKind): void {
+    const pull = this.pendingPull;
+    this.pendingPull = null;
+    if (pull === null) return;
+    const mark: ShotMark = { pull, kind };
+    this.lastShot = mark;
+    this.marks.push(mark);
+    if (this.marks.length > MARK_HISTORY) this.marks.shift();
   }
 
-  private beginEnding(outcome: Outcome): void {
-    this.outcome = outcome;
-    this.phase = 'ending';
-    this.phaseTime = 0;
-    this.pendingPower = null;
-    releasePlunger(this.plunger);
-    this.endingTimer = outcome === 'hole' ? FALL_ANIM : outcome === 'win' ? WIN_ANIM : 0;
-  }
-
-  private finish(): void {
-    const outcome = this.outcome ?? 'giveup';
+  private finish(outcome: Outcome): void {
+    const coin = this.coin;
     let newStampIndex: number | null = null;
     if (outcome === 'win') {
-      const nth = this.app.save.stampCount + 1;
-      newStampIndex = stampIndexFor(nth);
-      // リザルトに入る瞬間に保存する。演出中にリロードされても記録が残る
-      this.app.commitSave({ stampCount: nth });
+      const count = this.app.save.stampCount + 1;
+      newStampIndex = stampIndexFor(count);
+      this.app.commitSave({ stampCount: count });
     }
     this.app.goTo('result', {
       outcome,
-      reachedDepth: this.depth,
+      reachedDepth: coin ? depthOf(coin) : 1,
       difficulty: this.difficulty,
       newStampIndex,
+      lastShot: this.lastShot?.kind ?? null,
+      lastPull: this.lastShot?.pull ?? null,
     });
   }
 
-  // ------------------------------------------------------------ 入力
+  // ---------------------------------------------------------------- 入力
 
-  onPointer(phase: PointerPhase, p: Vec2, pointerId: number): void {
+  onPointer(phase: PointerPhase, p: Vec2, pointerId: number, ev: PointerEvent): void {
+    // あきらめるの長押しが最優先。掴んでいるあいだプランジャーには渡さない
+    if (phase === 'down' && dist(p, GIVEUP_CENTER) <= GIVEUP_CANCEL_R) {
+      this.giveUpPointer = pointerId;
+      this.giveUpHold = 0;
+      return;
+    }
+    if (this.giveUpPointer === pointerId) {
+      const away = phase === 'move' && dist(p, GIVEUP_CENTER) > GIVEUP_CANCEL_R;
+      if (away || phase === 'up' || phase === 'cancel') {
+        this.giveUpPointer = null;
+        this.giveUpHold = 0;
+      }
+      return;
+    }
+
     if (this.phase !== 'play') return;
 
     switch (phase) {
-      case 'down': {
-        if (dist(p, GIVEUP_CENTER) <= GIVEUP_R && this.giveUpPointerId === null) {
-          this.giveUpPointerId = pointerId;
-          this.giveUpHold = 0;
-          this.capture(pointerId);
-          return;
+      case 'down':
+        if (plungerPointerDown(this.plunger, p, pointerId)) {
+          this.app.canvas.setPointerCapture(ev.pointerId);
         }
-        if (this.plunger.cooldown > 0) return;
-        if (plungerPointerDown(this.plunger, p, pointerId)) this.capture(pointerId);
         break;
-      }
-      case 'move': {
-        if (pointerId === this.giveUpPointerId) {
-          if (dist(p, GIVEUP_CENTER) > GIVEUP_CANCEL_R) {
-            this.giveUpPointerId = null;
-            this.giveUpHold = 0;
-          }
-          return;
-        }
-        if (pointerId === this.plunger.pointerId) plungerPointerMove(this.plunger, p);
+      case 'move':
+        plungerPointerMove(this.plunger, p);
         break;
-      }
       case 'up':
       case 'cancel': {
-        if (pointerId === this.giveUpPointerId) {
-          this.giveUpPointerId = null;
-          this.giveUpHold = 0;
-          return;
-        }
-        if (pointerId !== this.plunger.pointerId) return;
-        // pointercancel でも発射する。iOS でシステムジェスチャに割り込まれたときに
-        // 操作が無かったことにならないようにするため
+        const pull = this.plunger.pull;
         const power = plungerPointerUp(this.plunger);
-        if (power !== null) {
-          triggerLevers(this.levers);
-          this.pendingPower = power;
-          this.pendingTimer = LEVER_HIT_DELAY;
-        }
+        if (power !== null) this.fire(power, pull);
         break;
       }
     }
   }
 
-  private capture(pointerId: number): void {
-    try {
-      this.app.canvas.setPointerCapture(pointerId);
-    } catch {
-      /* 一部環境では失敗しうる。捕捉できなくても動作は続く */
-    }
+  private fire(power: number, pull: number): void {
+    const coin = this.coin;
+    if (!coin || !canFlick(coin)) return;
+    const lane = this.lanes[coin.laneIndex]!;
+    flickCoin(coin, power);
+    triggerLevers(this.levers);
+    this.pendingPull = pull;
+    this.particles.emitStars(laneP(lane, COIN_R, COIN_R), 7, COLORS.accent);
   }
 
-  // ------------------------------------------------------------ 描画
+  // ---------------------------------------------------------------- 描画
 
   render(ctx: Ctx): void {
-    drawCabinetBase(ctx);
-    drawBoardFace(ctx, this.lanes);
+    const coin = this.coin;
+    drawRoom(ctx);
+    drawShell(ctx);
+    drawField(ctx, this.time);
 
-    drawEntryChute(ctx, this.lanes, ENTRY_U);
-    drawSideAnimals(ctx, this.lanes, this.time);
-    drawWinPocket(ctx, this.pocket, this.flagWave);
-    drawLeverRods(ctx, this.lanes);
+    // 奥から手前へ: 落下の光 → あたりの口 → 投入シュート → 落とし口 → レール
     for (const lane of this.lanes) {
-      drawLane(ctx, lane);
-      drawLaneArrows(ctx, lane);
-      drawOutHoles(ctx, lane);
-      drawGap(ctx, lane, this.time);
+      const drop = lane.index < ROW_COUNT - 1 ? ROW_GAP : BOARD_BOTTOM - lane.low.y;
+      drawChute(ctx, lane, drop, this.time);
     }
-    for (const lane of this.lanes) drawLever(ctx, lane, this.levers[lane.index]!);
+    drawWinPocket(ctx, this.pocket, this.time);
+    drawEntryChute(ctx, this.lanes[0]!, ENTRY_U, COIN_SLOT_CENTER);
 
-    this.renderCoin(ctx);
+    for (const lane of this.lanes) {
+      drawPits(ctx, lane, this.time);
+      drawRail(ctx, lane);
+      const lv = this.levers[lane.index]!;
+      drawLever(ctx, lane, lv.swing, lv.flash);
+    }
+
+    if (coin) this.renderCoin(ctx, coin);
     this.particles.render(ctx);
 
-    drawBoardFrame(ctx);
-    drawSideKnobs(ctx, this.lanes, this.levers);
-    drawCabinetLower(ctx);
+    drawGlass(ctx, this.time);
+    drawBezel(ctx);
+    drawDepthMarks(ctx, coin ? depthOf(coin) : 0);
+    for (const lane of this.lanes) drawLeverKnob(ctx, lane, this.levers[lane.index]!.swing);
+    drawCoinSlot(ctx, COIN_SLOT_CENTER, COIN_SLOT_SIZE.w, COIN_SLOT_SIZE.h);
+    drawGiveUp(ctx, clamp01(this.giveUpHold / GIVEUP_HOLD));
+    this.renderHeader(ctx);
 
-    drawCoinSlot(ctx);
-    if (this.phase === 'insert') {
-      drawInsertCoin(ctx, this.lanes, ENTRY_U, clamp01(this.phaseTime / INSERT_ANIM));
-    }
-
-    drawPlunger(
+    // 操作部。台を敷いてから、その上に載るものを描く
+    drawControlDeck(ctx);
+    this.renderDeck(ctx);
+    drawPowerMeter(
       ctx,
-      this.plunger.knobY,
       this.plunger.grabbed ? this.plunger.pull : this.plunger.visualPull,
+      this.marks,
     );
-    drawGiveUpButton(ctx, this.giveUpRingProgress());
+    drawPlunger(ctx, this.plunger.knobY, this.plunger.cooldown);
+    drawLastShot(ctx, this.lastShot, { x: DECK_COL, y: BOARD_BOTTOM + 168 });
 
-    if (this.shouldShowGuide()) {
-      const phase = (((this.time / 1.2) % 1) + 1) % 1;
-      drawHandGuide(ctx, this.plunger.knobY, phase);
+    if (this.phase === 'play' && this.plunger.idleTime > GUIDE_IDLE_DELAY && !this.plunger.grabbed) {
+      drawPullGuide(ctx, this.plunger.knobY, this.time);
     }
-
-    if (this.debug) this.renderDebug(ctx);
   }
 
-  private renderCoin(ctx: Ctx): void {
-    if (this.phase === 'insert') return; // 投入中はシュート側で描く
-    const c = this.coin;
+  private renderHeader(ctx: Ctx): void {
+    text(ctx, this.difficulty.label, LOGICAL_W / 2, BOARD_TOP + 30, {
+      size: 20,
+      color: COLORS.textDim,
+      weight: '800',
+    });
+    text(ctx, this.difficulty.tag, LOGICAL_W / 2, BOARD_TOP + 54, {
+      size: 12,
+      color: alpha(COLORS.accent, 0.6),
+      weight: '700',
+      tracking: 4,
+    });
+  }
 
-    if (c.state === 'lost') {
-      this.renderLostCoin(ctx, c);
+  /** 操作部の文字。台の上に載るので drawControlDeck のあとに描く */
+  private renderDeck(ctx: Ctx): void {
+    const depth = this.coin ? depthOf(this.coin) : 1;
+    text(ctx, 'いま', DECK_COL, BOARD_BOTTOM + 52, {
+      size: 13,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+    text(ctx, `${depth} / ${ROW_COUNT}`, DECK_COL, BOARD_BOTTOM + 88, {
+      size: 40,
+      color: COLORS.text,
+      weight: '900',
+    });
+    text(ctx, 'だんめ', DECK_COL, BOARD_BOTTOM + 118, {
+      size: 13,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+  }
+
+  private renderCoin(ctx: Ctx, coin: CoinState): void {
+    if (this.phase === 'insert') {
+      const t = easeInOut(clamp01(this.insertT / INSERT_ANIM));
+      const from = COIN_SLOT_CENTER;
+      const to = laneP(this.lanes[0]!, ENTRY_U, COIN_R);
+      const pos: Vec2 = {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t * t,
+      };
+      drawCoin(ctx, { pos, spin: t * 9, animal: this.animal, sink: 0, vel: { x: 0, y: 0 } });
       return;
     }
 
-    if (c.state === 'win') {
-      const t = clamp01(c.timer / 0.5);
-      const bounce = Math.abs(Math.sin(t * Math.PI * 2)) * (1 - t) * 16;
-      drawCoin(ctx, { x: c.pos.x, y: c.pos.y - bounce }, COIN_R, 0, c.spin);
-      return;
-    }
+    const sink = coin.phase === 'lost' ? clamp01(1 - coin.timer / SINK_TIME) : 0;
+    const at = coin.lostAt;
+    const pos: Vec2 =
+      at && sink > 0
+        ? {
+            x: coin.pos.x + (at.x - coin.pos.x) * sink,
+            y: coin.pos.y + (at.y - coin.pos.y) * sink + sink * 20,
+          }
+        : coin.pos;
 
-    const squash =
-      this.squashTimer > 0 ? Math.sin((this.squashTimer / LAND_SQUASH_TIME) * Math.PI) : 0;
-    drawCoin(ctx, c.pos, COIN_R, 0, c.spin, squash);
-  }
+    drawCoin(ctx, { pos, spin: coin.spin, animal: this.animal, sink, vel: coin.vel });
 
-  /** 丸穴に「ぽとん」と沈む。穴の手前のリムがコインを隠す */
-  private renderLostCoin(ctx: Ctx, c: Coin): void {
-    const t = clamp01(c.timer / FALL_ANIM);
-    // 0..0.3: 穴の口まで滑る / 0.3..0.8: 沈む / 0.8..: 消える
-    const slide = easeOut(clamp01(t / 0.3));
-    const sink = clamp01((t - 0.3) / 0.5);
-    const r = Math.min(LANE_W / 2, 36);
-    const x = lerp(c.pos.x, c.lostAt.x, slide);
-    const y = lerp(c.pos.y, c.lostAt.y + r * 0.7, sink);
-    const scale = 1 - sink * 0.45;
-
-    ctx.save();
-    if (t > 0.8) ctx.globalAlpha = Math.max(0, 1 - (t - 0.8) / 0.2);
-    drawCoin(ctx, { x, y }, COIN_R * scale, 0, c.spin + slide * 2 + sink * 3);
-    ctx.restore();
-    if (sink > 0) drawHoleFront(ctx, c.lostAt, r);
-  }
-
-  private giveUpRingProgress(): number {
-    if (this.giveUpPointerId === null) return 0;
-    if (this.giveUpHold < GIVEUP_RING_DELAY) return 0;
-    return clamp01(this.giveUpHold / GIVEUP_HOLD);
-  }
-
-  /**
-   * 弾ける状態でしばらく何もしていないときだけガイドを出す。
-   * 3歳児はひらがなを読めないため、この指アニメが唯一の操作説明になる。
-   */
-  private shouldShowGuide(): boolean {
-    return (
-      this.phase === 'play' &&
-      this.plunger.idleTime >= GUIDE_IDLE_DELAY &&
-      this.plunger.cooldown <= 0 &&
-      canFlick(this.coin)
-    );
-  }
-
-  private renderDebug(ctx: Ctx): void {
-    const c = this.coin;
-    const lane = this.lanes[c.laneIndex]!;
-    const lines = [
-      `phase=${this.phase} state=${c.state} held=${c.held}`,
-      `lane=${c.laneIndex + 1} u=${c.u.toFixed(0)} v=${c.v.toFixed(0)}`,
-      `near=${lane.nearHole.from}..${lane.nearHole.to} gap=${lane.gap.from}..${lane.gap.to}`,
-      `pull=${this.plunger.pull.toFixed(3)} depth=${this.depth} diff=${this.difficulty.id}`,
-    ];
-    ctx.save();
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(170, 20, 400, 20 + lines.length * 26);
-    ctx.restore();
-    lines.forEach((l, i) =>
-      text(ctx, l, 182, 44 + i * 26, {
-        size: 20,
-        color: COLORS.ink,
-        align: 'left',
-        weight: '600',
-      }),
-    );
+    // 落ちた穴の手前側の縁をコインの上に重ね、穴に入っていくように見せる
+    if (coin.phase === 'lost' && at) drawPitLip(ctx, at, COLORS.holeRim);
   }
 }

@@ -1,7 +1,6 @@
 /**
- * リザルト画面。詳細設計書 §7.6。
- *
- * どの結果でも責める演出はしない。
+ * リザルト画面。結果と、なぜそうなったか(弱すぎ / 強すぎ)を出す。
+ * 責める演出はしない。次にどう直せばいいかだけを伝える。
  */
 
 import {
@@ -11,47 +10,46 @@ import {
   RESULT_INPUT_DELAY,
   ROW_COUNT,
   STAMP_ANIM,
+  type DifficultyConfig,
   type Rect,
   type Vec2,
 } from '../config.ts';
-import { drawCheerAnimal } from '../render/animals.ts';
-import {
-  drawButton,
-  drawResultSteps,
-  drawSky,
-  drawStamp,
-  drawSunAndClouds,
-} from '../render/drawings.ts';
+import { drawRoom, drawShell } from '../render/cabinet.ts';
+import { drawButton } from '../render/hud.ts';
 import { ParticleSystem } from '../render/particles.ts';
-import { circle, clamp01, easeBack, paint, rectContains, text, type Ctx } from '../render/shapes.ts';
+import { drawDepthLadder, drawMarquee, drawStampPress } from '../render/panels.ts';
+import { alpha, clamp01, rectContains, text, type Ctx } from '../render/shapes.ts';
 import type { Outcome, PointerPhase, ResultParams, Scene, SceneContext } from './scene.ts';
 
-const AGAIN: Rect = { x: 120, y: 980, w: 480, h: 140 };
-const TO_TITLE: Rect = { x: 230, y: 1150, w: 260, h: 90 };
+const AGAIN: Rect = { x: 120, y: 880, w: 480, h: 100 };
+const HOME: Rect = { x: 240, y: 1012, w: 240, h: 64 };
 
-const HEADING: Record<Outcome, string> = {
-  win: 'やったね!',
-  hole: 'おしい!',
-  giveup: 'またね!',
+const HEADLINE: Record<Outcome, string> = {
+  win: 'あたり!',
+  hole: 'おしい',
+  giveup: 'またね',
+};
+
+const HINT: Record<string, string> = {
+  weak: 'あと少し強く引くと、隙間まで届く',
+  strong: '引きすぎ。もう少し弱く',
 };
 
 export class ResultScene implements Scene {
   private params: ResultParams | null = null;
   private time = 0;
   private particles = new ParticleSystem();
-  private confettiTimer = 0;
-  private pressed: 'again' | 'title' | null = null;
+  private pressed: 'again' | 'home' | null = null;
 
   constructor(private app: SceneContext) {}
 
   enter(params: unknown): void {
-    this.params = params as ResultParams;
+    this.params = (params as ResultParams | undefined) ?? null;
     this.time = 0;
-    this.confettiTimer = 0;
     this.pressed = null;
     this.particles.clear();
-    if (this.params.outcome === 'win') {
-      this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 40);
+    if (this.params?.outcome === 'win') {
+      this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 90, LOGICAL_W);
     }
   }
 
@@ -63,19 +61,13 @@ export class ResultScene implements Scene {
   update(dt: number): void {
     this.time += dt;
     this.particles.update(dt);
-    if (this.params?.outcome === 'win') {
-      this.confettiTimer -= dt;
-      if (this.confettiTimer <= 0) {
-        this.confettiTimer = 0.4;
-        this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 20);
-      }
+    if (this.params?.outcome === 'win' && this.time < 2.4 && Math.random() < dt * 6) {
+      this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 8, LOGICAL_W);
     }
   }
 
   onPointer(phase: PointerPhase, p: Vec2): void {
-    // 演出中の連打で飛ばされないよう、しばらく反応しない
     if (this.time < RESULT_INPUT_DELAY) return;
-
     if (phase === 'down') {
       this.pressed = hit(p);
       return;
@@ -84,116 +76,100 @@ export class ResultScene implements Scene {
       this.pressed = null;
       return;
     }
-    if (phase === 'up') {
-      const h = hit(p);
-      const was = this.pressed;
-      this.pressed = null;
-      if (!h || h !== was) return;
-      if (h === 'again') {
-        this.app.goTo('game', { difficulty: this.params?.difficulty });
-      } else {
-        this.app.goTo('title');
-      }
+    if (phase !== 'up') return;
+
+    const target = hit(p);
+    const was = this.pressed;
+    this.pressed = null;
+    if (!target || target !== was) return;
+
+    if (target === 'again') {
+      const d: DifficultyConfig | undefined = this.params?.difficulty;
+      this.app.goTo('game', d ? { difficulty: d } : undefined);
+    } else {
+      this.app.goTo('title');
     }
   }
 
   render(ctx: Ctx): void {
     const p = this.params;
-    drawSky(ctx);
-    drawSunAndClouds(ctx, this.time);
-    if (!p) return;
+    drawRoom(ctx);
+    drawShell(ctx);
+    drawMarquee(ctx, 62, p?.difficulty.tag ?? 'RESULT');
 
-    const won = p.outcome === 'win';
+    const outcome = p?.outcome ?? 'giveup';
+    const accent =
+      outcome === 'win' ? COLORS.gap : outcome === 'hole' ? COLORS.holeRim : COLORS.textDim;
 
-    text(ctx, HEADING[p.outcome], LOGICAL_W / 2, 240, {
-      size: 92,
-      color: won ? COLORS.accent : COLORS.ink,
-      outline: 14,
+    text(ctx, HEADLINE[outcome], LOGICAL_W / 2, 200, {
+      size: 74,
+      color: accent,
+      weight: '900',
     });
 
-    drawResultSteps(ctx, { x: LOGICAL_W / 2, y: 520 }, p.reachedDepth, won);
-
-    text(
-      ctx,
-      won ? `${ROW_COUNT}だん おりて あたり!` : `${p.reachedDepth}だんめ まで おりたよ`,
-      LOGICAL_W / 2,
-      710,
-      { size: 34, color: COLORS.ink, outline: 8 },
-    );
-
-    this.renderReaction(ctx, p);
-    this.renderStamp(ctx, p);
-
-    drawButton(ctx, AGAIN, 'もういちど', true, this.pressed === 'again');
-    drawButton(ctx, TO_TITLE, 'さいしょから', false, this.pressed === 'title');
-
-    if (won) this.particles.render(ctx);
-  }
-
-  /** 結果ごとのどうぶつの反応。失敗でも悲しい表現は使わない */
-  private renderReaction(ctx: Ctx, p: ResultParams): void {
-    const t = this.time;
-    const cx = LOGICAL_W / 2;
-    switch (p.outcome) {
-      case 'win':
-        drawCheerAnimal(ctx, 'usagi', cx - 150, 830, 92, 0.6 + Math.sin(t * 6) * 0.4);
-        drawCheerAnimal(ctx, 'kuma', cx + 150, 830, 92, 0.6 + Math.sin(t * 6 + 1.2) * 0.4);
-        break;
-      case 'hole': {
-        // 穴からひょっこり顔を出して笑う
-        const peek = Math.min(1, t * 1.6);
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(cx - 120, 760, 240, 120);
-        ctx.clip();
-        drawCheerAnimal(ctx, 'risu', cx, 900 - peek * 78, 100, 0.35);
-        ctx.restore();
-        ctx.beginPath();
-        ctx.ellipse(cx, 878, 116, 26, 0, 0, Math.PI * 2);
-        paint(ctx, COLORS.hole, COLORS.ink, 5);
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(cx - 120, 700, 240, 178);
-        ctx.clip();
-        drawCheerAnimal(ctx, 'risu', cx, 900 - peek * 78, 100, 0.35);
-        ctx.restore();
-        break;
-      }
-      case 'giveup':
-        drawCheerAnimal(ctx, 'neko', cx, 840, 104, 0.5 + Math.sin(t * 5) * 0.45);
-        break;
-    }
-  }
-
-  /** あたり時のスタンプ「ぺたん!」 */
-  private renderStamp(ctx: Ctx, p: ResultParams): void {
-    if (p.outcome !== 'win' || p.newStampIndex === null) return;
-    const start = 0.35;
-    if (this.time < start) return;
-    const t = clamp01((this.time - start) / STAMP_ANIM);
-    // 大きく降ってきて、ぺたんと押される
-    const scale = t < 1 ? 2.4 - 1.4 * easeBack(t) : 1;
-    const center: Vec2 = { x: LOGICAL_W / 2 + 215, y: 430 };
-
-    ctx.save();
-    if (t < 1) ctx.globalAlpha = 0.35 + 0.65 * t;
-    circle(ctx, center.x, center.y, 62);
-    paint(ctx, 'rgba(255,255,255,0.85)', COLORS.accent, 5);
-    drawStamp(ctx, p.newStampIndex, center, 104, scale);
-    ctx.restore();
-
-    if (t >= 1) {
-      text(ctx, 'スタンプ ゲット!', center.x, center.y + 86, {
-        size: 22,
-        color: COLORS.accent,
-        outline: 7,
+    const hint = p?.lastShot ? HINT[p.lastShot] : undefined;
+    if (outcome === 'hole' && hint) {
+      text(ctx, hint, LOGICAL_W / 2, 268, {
+        size: 20,
+        color: COLORS.textDim,
+        weight: '700',
       });
     }
+    if (outcome === 'win') {
+      text(ctx, `${p?.difficulty.label ?? ''} を 5 段おりきった`, LOGICAL_W / 2, 268, {
+        size: 20,
+        color: COLORS.textDim,
+        weight: '700',
+      });
+    }
+
+    drawDepthLadder(ctx, LOGICAL_W / 2, 330, p?.reachedDepth ?? 1, outcome === 'win');
+
+    if (outcome === 'win' && p?.newStampIndex !== null && p?.newStampIndex !== undefined) {
+      drawStampPress(ctx, LOGICAL_W / 2, 690, p.newStampIndex, this.time / STAMP_ANIM);
+      text(ctx, 'メダルを 1 まい ゲット', LOGICAL_W / 2, 764, {
+        size: 18,
+        color: COLORS.accent,
+        weight: '800',
+      });
+    } else {
+      text(ctx, `とうたつ ${p?.reachedDepth ?? 1} / ${ROW_COUNT} だん`, LOGICAL_W / 2, 700, {
+        size: 20,
+        color: COLORS.textDim,
+        weight: '700',
+      });
+      if (p?.lastPull != null) {
+        text(ctx, `さいごに つかった力  ${Math.round(p.lastPull * 100)}%`, LOGICAL_W / 2, 750, {
+          size: 18,
+          color: alpha(COLORS.accent, 0.75),
+          weight: '700',
+        });
+      }
+    }
+
+    this.particles.render(ctx);
+
+    const ready = this.time >= RESULT_INPUT_DELAY;
+    ctx.save();
+    ctx.globalAlpha = ready ? 1 : clamp01(this.time / RESULT_INPUT_DELAY) * 0.5;
+    drawButton(
+      ctx,
+      AGAIN,
+      { fill: COLORS.gap, edge: alpha(COLORS.gap, 0.9), label: 'もういちど', size: 30 },
+      this.pressed === 'again',
+    );
+    drawButton(
+      ctx,
+      HOME,
+      { fill: COLORS.shellHi, edge: alpha(COLORS.textDim, 0.6), label: 'さいしょから', size: 19 },
+      this.pressed === 'home',
+    );
+    ctx.restore();
   }
 }
 
-function hit(p: Vec2): 'again' | 'title' | null {
+function hit(p: Vec2): 'again' | 'home' | null {
   if (rectContains(AGAIN, p, BUTTON_PADDING)) return 'again';
-  if (rectContains(TO_TITLE, p, BUTTON_PADDING)) return 'title';
+  if (rectContains(HOME, p, BUTTON_PADDING)) return 'home';
   return null;
 }

@@ -1,14 +1,14 @@
 /**
- * プランジャー(唯一の操作)。詳細設計書 §6。
+ * プランジャー(唯一の操作)。
  *
  * Canvas も DOM も参照しない。ポインタ座標は論理座標で受け取る。
  */
 
 import {
-  GRAB_ZONE,
-  KNOB_RETURN,
-  KNOB_REST,
   FLICK_COOLDOWN,
+  GRAB_ZONE,
+  KNOB_REST,
+  KNOB_RETURN,
   P_MAX,
   P_MIN,
   PULL_DEADZONE,
@@ -73,8 +73,7 @@ export function plungerPointerDown(st: PlungerState, p: Vec2, pointerId: number)
 
 /**
  * 下方向の変位だけを見る。横方向の移動は完全に無視する。
- * 3歳児のドラッグは大きく蛇行するため、これが「シビアな操作を減らす」要件の
- * 実装手段のひとつになっている(詳細設計書 §6.1)。
+ * 指が蛇行しても引き量が暴れないので、狙った力を出しやすい。
  */
 export function plungerPointerMove(st: PlungerState, p: Vec2): void {
   if (!st.grabbed) return;

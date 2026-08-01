@@ -1,40 +1,31 @@
 /**
- * タイトル画面。詳細設計書 §7.2。
+ * タイトル画面。難易度を選ぶとそのままゲームへ入る。
  */
 
 import {
   BUTTON_PADDING,
+  COLORS,
   DIFFICULTIES,
   LOGICAL_W,
   type DifficultyId,
   type Rect,
   type Vec2,
 } from '../config.ts';
-import {
-  drawButton,
-  drawSky,
-  drawStampBook,
-  drawSunAndClouds,
-  drawTitleLogo,
-} from '../render/drawings.ts';
-import { rectContains, type Ctx } from '../render/shapes.ts';
+import { drawRoom, drawShell } from '../render/cabinet.ts';
+import { drawDifficultyCard, drawLogo, drawMarquee, drawStampShelf } from '../render/panels.ts';
+import { rectContains, text, type Ctx } from '../render/shapes.ts';
 import type { PointerPhase, Scene, SceneContext } from './scene.ts';
 
-interface DiffButton {
-  id: DifficultyId;
-  rect: Rect;
-}
-
-const BUTTONS: DiffButton[] = [
-  { id: 'easy', rect: { x: 120, y: 470, w: 480, h: 140 } },
-  { id: 'normal', rect: { x: 120, y: 650, w: 480, h: 140 } },
+const CARDS: { id: DifficultyId; rect: Rect }[] = [
+  { id: 'easy', rect: { x: 96, y: 520, w: 528, h: 168 } },
+  { id: 'normal', rect: { x: 96, y: 712, w: 528, h: 168 } },
 ];
 
 export class TitleScene implements Scene {
   private time = 0;
   private pressed: DifficultyId | null = null;
 
-  constructor(private ctxApp: SceneContext) {}
+  constructor(private app: SceneContext) {}
 
   enter(): void {
     this.time = 0;
@@ -51,7 +42,7 @@ export class TitleScene implements Scene {
 
   onPointer(phase: PointerPhase, p: Vec2): void {
     if (phase === 'down') {
-      this.pressed = hitButton(p);
+      this.pressed = hit(p);
       return;
     }
     if (phase === 'cancel') {
@@ -59,42 +50,67 @@ export class TitleScene implements Scene {
       return;
     }
     if (phase === 'up') {
-      // 押し始めと同じボタンの上で離したときだけ発火する。
-      // 押し間違いに気づいて指をずらせば発火しない(3歳児向けの配慮)
-      const hit = hitButton(p);
-      const wasPressed = this.pressed;
+      // 押し始めと同じカードの上で離したときだけ決定する
+      const target = hit(p);
+      const was = this.pressed;
       this.pressed = null;
-      if (hit && hit === wasPressed) {
-        this.ctxApp.commitSave({ lastDifficulty: hit });
-        this.ctxApp.goTo('game', { difficulty: DIFFICULTIES[hit] });
+      if (target && target === was) {
+        this.app.commitSave({ lastDifficulty: target });
+        this.app.goTo('game', { difficulty: DIFFICULTIES[target] });
       }
     }
   }
 
   render(ctx: Ctx): void {
-    drawSky(ctx);
-    drawSunAndClouds(ctx, this.time);
+    drawRoom(ctx);
+    drawShell(ctx);
+    drawMarquee(ctx, 62, 'ARCADE  COIN  GAME');
+    drawLogo(ctx, LOGICAL_W / 2, 250, this.time);
 
-    drawTitleLogo(ctx, { x: LOGICAL_W / 2, y: 230 }, this.time);
+    text(ctx, 'コインを弾いてレーンを登り、', LOGICAL_W / 2, 386, {
+      size: 19,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+    text(ctx, 'ちょうどいい隙間から落として 5 段おりる。', LOGICAL_W / 2, 416, {
+      size: 19,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+    text(ctx, '強すぎても弱すぎても、穴に落ちて終わり。', LOGICAL_W / 2, 452, {
+      size: 17,
+      color: COLORS.strong,
+      weight: '700',
+    });
 
-    const recommended = this.ctxApp.save.lastDifficulty;
-    for (const b of BUTTONS) {
-      drawButton(
-        ctx,
-        b.rect,
-        DIFFICULTIES[b.id].label,
-        b.id === recommended,
-        this.pressed === b.id,
-      );
+    const last = this.app.save.lastDifficulty;
+    for (const c of CARDS) {
+      drawDifficultyCard(ctx, c.rect, DIFFICULTIES[c.id], c.id === last, this.pressed === c.id);
     }
 
-    drawStampBook(ctx, this.ctxApp.save.stampCount, { x: 76, y: 900 }, LOGICAL_W - 152);
+    drawStampShelf(ctx, this.app.save.stampCount, 76, 986, LOGICAL_W - 152);
+
+    text(ctx, 'パワーメーターには前のショットの跡が残る。', LOGICAL_W / 2, 1094, {
+      size: 15,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+    text(ctx, 'よわい / ちょうど / つよい を見ながら詰めていける。', LOGICAL_W / 2, 1122, {
+      size: 15,
+      color: COLORS.textDim,
+      weight: '700',
+    });
+
+    text(ctx, 'MATTER.JS PHYSICS', LOGICAL_W / 2, 1206, {
+      size: 11,
+      color: COLORS.textDim,
+      weight: '700',
+      tracking: 4,
+    });
   }
 }
 
-function hitButton(p: Vec2): DifficultyId | null {
-  for (const b of BUTTONS) {
-    if (rectContains(b.rect, p, BUTTON_PADDING)) return b.id;
-  }
+function hit(p: Vec2): DifficultyId | null {
+  for (const c of CARDS) if (rectContains(c.rect, p, BUTTON_PADDING)) return c.id;
   return null;
 }

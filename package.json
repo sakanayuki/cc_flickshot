@@ -11,10 +11,14 @@
     "verify": "tsx scripts/verify-geometry.ts"
   },
   "devDependencies": {
+    "@types/matter-js": "^0.20.2",
     "@types/node": "^22.10.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "matter-js": "^0.20.0"
   }
 }

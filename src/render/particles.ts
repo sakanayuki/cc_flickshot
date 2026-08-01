@@ -1,5 +1,5 @@
 /**
- * パーティクル。紙吹雪(あたり)、土煙(着地)、火花(板の端にぶつかった時)。
+ * パーティクル。紙吹雪(あたり)、土煙(着地)、火花(レバーで蹴った瞬間)。
  * すべてコード描画で、上限を設けて低スペック端末でも fps が落ちないようにする。
  */
 
@@ -27,7 +27,7 @@ const GRAVITY = 600;
 /** 低スペック端末での fps 低下を防ぐための上限 */
 const MAX_PARTICLES = 300;
 
-const CONFETTI_COLORS = ['#FF8A3D', '#E8503A', '#F5C242', '#6FCF97', '#56A8F5', '#C77DFF'];
+const CONFETTI_COLORS = ['#3DD8C4', '#F0D9A0', '#E8B54B', '#E2603A', '#8FD7F2', '#C8A15A'];
 
 export class ParticleSystem {
   private items: Particle[] = [];
@@ -73,7 +73,7 @@ export class ParticleSystem {
         rotVel: 0,
         w: 7 + Math.random() * 8,
         h: 0,
-        color: 'rgba(214,190,150,0.85)',
+        color: 'rgba(150,180,200,0.6)',
         life: 0,
         ttl: 0.35 + Math.random() * 0.2,
         wobble: 0,

@@ -1,217 +1,177 @@
 /**
- * 盤面の幾何。実機の写真と同じ、**ななめ上向きのレーン**が段になって並ぶ。
+ * 盤面の幾何。ここには物理も描画も無い。純粋な座標計算だけ。
  *
- * レーン 1 本を低い端(u=0)から見た並び:
- *
- *   レバー
- *     ●━━━━━━━○○━━━━┈┈┈┈┈┈┈┈━━●●●
- *     0      手前の穴  隙間          奥の穴   高い端
- *            (弱すぎ) (ここから落ちる) (強すぎ)
- *
- * 盤面全体(段ごとに低い端が右・左・右…と入れ替わる):
- *
- *              [投入口]
- *   段1:  ●●●━┈┈┈━○○━━━━━━━━●   ← 低い端は右。左上へ登る
- *              ↓ 隙間から落ちる
- *   段2:  ●━━━━━━━━○○━┈┈┈━●●●   ← 低い端は左。右上へ登る
- *                        ↓
- *   段3:  ●●●━┈┈┈━○○━━━━━━━━●
- *              ↓
- *   ...
- *   あたりの口は最下段の隙間の真下に置く。
- *
- * 隙間から落ちたコインは 1 段下のレーンの**低い端寄り**に着地し、
- * そのまま滑り降りてレバーで止まる。だから手前の穴は着地点より奥に置く。
- *
- * このモジュールは Canvas も DOM も参照しない。
+ * 5 段のレーンはすべて合同(左右反転のみ)で、低い端が右・左・右…と交互に
+ * 入れ替わる。低い端は壁ぎわにあり、その横からレバーが生えている。
  */
 
 import {
+  BOARD_BOTTOM,
   BOARD_LEFT,
   BOARD_RIGHT,
   COIN_R,
-  GAP_END_U,
-  GAP_LEAD_U,
-  GRAVITY,
-  HOLE_NEAR_U,
   LANE_LEFT_X,
   LANE_RIGHT_X,
   LANE_RISE,
   LANE_SPAN_X,
+  LANE_THICK,
+  MAX_REACH,
   ROW_COUNT,
   ROW_GAP,
   ROW_TOP_Y,
+  SOLID_RUN,
   type DifficultyConfig,
   type LaneSide,
+  type Span,
   type Vec2,
 } from '../config.ts';
 
-/** レーンに沿った区間 */
-export interface Span {
-  from: number;
-  to: number;
-}
-
-/** ななめ上向きのレーン 1 本 */
 export interface Lane {
   index: number;
-  /** 低い端がどちらの壁ぎわか。ここにレバーが立つ */
+  /** 低い端(ストッパー・レバー)がどちらの壁か */
   side: LaneSide;
-  /** 低い端(u=0)。コインが止まる位置 */
   low: Vec2;
-  /** 高い端(u=length) */
   high: Vec2;
-  /** 斜面の長さ */
+  /** レーンに沿った全長 */
   length: number;
-  /** 低い端→高い端の単位ベクトル */
+  /** 低い端 → 高い端の単位ベクトル */
   dir: Vec2;
-  /** 斜面に沿った重力の減速 = GRAVITY * sinθ。全段で同じ */
-  decel: number;
-  /** 手前の穴(弱すぎ) */
+  /** レーン面から上向きの単位法線 */
+  norm: Vec2;
+  /** dir の角度 (rad)。Matter.js の body.angle に渡す */
+  angle: number;
+  /** sinθ。斜面の減速の強さ */
+  slope: number;
   nearHole: Span;
-  /** 進める隙間。ここから落ちると 1 段下へ */
   gap: Span;
-  /** 奥の穴(強すぎ)。高い端まで */
   farHole: Span;
+  /** 床のある区間。Matter.js の静的剛体はここにだけ置く */
+  solids: Span[];
 }
 
-/** あたりの口。最下段の隙間の真下に置く */
 export interface WinPocket {
-  left: number;
-  right: number;
-  /** 受け口の高さ。コイン中心がこの y に達したら判定する */
-  y: number;
+  /** 開口の中心 */
+  center: Vec2;
+  w: number;
+  h: number;
 }
 
-/** 段 index の低い端がどちらの壁か。1 段目は右(投入口の側) */
 function sideOf(index: number): LaneSide {
   return index % 2 === 0 ? 'right' : 'left';
 }
 
-/**
- * レーンを作る。全段まったく同じ形(左右反転のみ)なので、
- * 5 回の操作の条件は構造的に完全一致する。
- */
+/** レーン 1 本ぶんの長さ。全段共通 */
+export const LANE_LENGTH = Math.hypot(LANE_SPAN_X, LANE_RISE);
+
+/** 隙間の終わり。ここから先は奥の穴 = 強すぎ。難易度によらず固定 */
+export const GAP_END_U = SOLID_RUN + MAX_REACH;
+
 export function buildLanes(d: DifficultyConfig): Lane[] {
-  const length = Math.hypot(LANE_SPAN_X, LANE_RISE);
-  const decel = (GRAVITY * LANE_RISE) / length; // GRAVITY * sinθ
-  const nearFrom = HOLE_NEAR_U;
-  const nearTo = nearFrom + d.nearHoleSpan;
-  const gapFrom = nearTo + GAP_LEAD_U;
+  const nearHole: Span = { from: SOLID_RUN, to: SOLID_RUN + d.nearHoleSpan };
+  const gap: Span = { from: nearHole.to, to: GAP_END_U };
+  const farHole: Span = { from: GAP_END_U, to: LANE_LENGTH };
 
   return Array.from({ length: ROW_COUNT }, (_, i): Lane => {
     const side = sideOf(i);
     const y = ROW_TOP_Y + i * ROW_GAP;
     const low: Vec2 = { x: side === 'right' ? LANE_RIGHT_X : LANE_LEFT_X, y };
-    const high: Vec2 = {
-      x: side === 'right' ? LANE_LEFT_X : LANE_RIGHT_X,
-      y: y - LANE_RISE,
+    const high: Vec2 = { x: side === 'right' ? LANE_LEFT_X : LANE_RIGHT_X, y: y - LANE_RISE };
+
+    const dir: Vec2 = {
+      x: (high.x - low.x) / LANE_LENGTH,
+      y: (high.y - low.y) / LANE_LENGTH,
     };
+    // 上向き(y が負)の法線を選ぶ
+    let norm: Vec2 = { x: -dir.y, y: dir.x };
+    if (norm.y > 0) norm = { x: -norm.x, y: -norm.y };
+
     return {
       index: i,
       side,
       low,
       high,
-      length,
-      dir: { x: (high.x - low.x) / length, y: (high.y - low.y) / length },
-      decel,
-      nearHole: { from: nearFrom, to: nearTo },
-      gap: { from: gapFrom, to: GAP_END_U },
-      farHole: { from: GAP_END_U, to: length },
+      length: LANE_LENGTH,
+      dir,
+      norm,
+      angle: Math.atan2(dir.y, dir.x),
+      slope: LANE_RISE / LANE_LENGTH,
+      nearHole,
+      gap,
+      farHole,
+      // 床はレールの 1 本だけ。ここから先はすべて落とし口
+      solids: [{ from: 0, to: SOLID_RUN }],
     };
   });
 }
 
-/**
- * あたりの口。最下段の隙間の真下、落ちてきたコインをそのまま受ける位置に置く。
- * 幅も隙間と同じなので、6 回目の操作も他とまったく同じ条件になる。
- */
-export function buildWinPocket(d: DifficultyConfig): WinPocket {
-  const lanes = buildLanes(d);
-  const last = lanes[ROW_COUNT - 1]!;
-  const a = posOnLane(last, last.gap.from).x;
-  const b = posOnLane(last, last.gap.to).x;
+/** レーン上の点。u = 低い端からの距離、perp = レーン面からの高さ */
+export function laneP(lane: Lane, u: number, perp = 0): Vec2 {
   return {
-    left: Math.min(a, b),
-    right: Math.max(a, b),
-    y: last.low.y + ROW_GAP,
+    x: lane.low.x + lane.dir.x * u + lane.norm.x * perp,
+    y: lane.low.y + lane.dir.y * u + lane.norm.y * perp,
   };
 }
 
-// ---------------------------------------------------------------- 斜面の上の幾何
-
-/** レーン上の距離 u の座標 */
-export function posOnLane(lane: Lane, u: number): Vec2 {
-  return { x: lane.low.x + lane.dir.x * u, y: lane.low.y + lane.dir.y * u };
+/** 任意の点を、そのレーンの (u, perp) に射影する */
+export function laneProject(lane: Lane, p: Vec2): { u: number; perp: number } {
+  const dx = p.x - lane.low.x;
+  const dy = p.y - lane.low.y;
+  return {
+    u: dx * lane.dir.x + dy * lane.dir.y,
+    perp: dx * lane.norm.x + dy * lane.norm.y,
+  };
 }
 
-/** この x はレーンの何 u か。x がレーンの範囲外なら範囲外の値を返す */
-export function laneUAtX(lane: Lane, x: number): number {
-  return (x - lane.low.x) / lane.dir.x;
+/**
+ * コインが構えるときの中心位置。ストッパーとレール面の両方にちょうど接する。
+ *
+ * ここが 1px でも浮いていると、弾いた直後にコインが落ちて跳ね、
+ * その跳ねの位相がレールの端に届くタイミング次第で落下位置を変えてしまう。
+ * 弾く力に対して結果が単調でなくなるので、厳密に接地させること。
+ */
+export function restPoint(lane: Lane): Vec2 {
+  return laneP(lane, COIN_R, COIN_R);
 }
 
-/** レーンの上面の y(コインの中心が来る高さ)。x はレーンの範囲内であること */
-export function laneYAtX(lane: Lane, x: number): number {
-  return lane.low.y + lane.dir.y * laneUAtX(lane, x);
-}
-
-/** x がレーンの水平範囲に入っているか */
-export function xOnLane(_lane: Lane, x: number): boolean {
-  return x >= LANE_LEFT_X - 0.5 && x <= LANE_RIGHT_X + 0.5;
-}
-
-function inSpan(s: Span, u: number): boolean {
+export function inSpan(s: Span, u: number): boolean {
   return u >= s.from && u <= s.to;
 }
 
-/** u が手前の穴の上か */
-export function inNearHole(lane: Lane, u: number): boolean {
-  return inSpan(lane.nearHole, u);
-}
-
-/** u が隙間の上か */
-export function inGap(lane: Lane, u: number): boolean {
-  return inSpan(lane.gap, u);
-}
-
-/** u が奥の穴の上か */
-export function inFarHole(lane: Lane, u: number): boolean {
-  return inSpan(lane.farHole, u);
+/**
+ * 隙間から落ちたコインが 1 段下のレーンに着く位置(そのレーンの u')の上限。
+ *
+ * 段は左右反転なので、真下に落ちれば u' = レーン長 - u。実際には
+ * 落ちるときの水平速度でもっと低い端の側へ寄るので、これが最悪値になる。
+ * ここが手前の穴に掛かると、着地したコインが滑り降りる途中で
+ * 自分から落ちてしまう(検算 §1 が数値で固定している)。
+ */
+export function maxLandingU(d: DifficultyConfig): number {
+  return LANE_LENGTH - (SOLID_RUN + d.nearHoleSpan);
 }
 
 /**
- * 隙間から落ちたコインが 1 段下のレーンのどこに着くか(u の範囲)。
- *
- * 隙間は高い端の側にあるので、着地点は次のレーンの**低い端の側**になる。
- * この最大値が HOLE_NEAR_U より小さくないと、着地したコインが
- * 滑り降りる途中で自分から手前の穴に落ちてしまう(検算 §1)。
+ * あたりの口。最下段の隙間から落ちたコインは、勢いを持ったまま
+ * 高い端の側の壁へ飛んでいく。受け口はその壁ぎわの床に置く。
  */
-export function landingURange(d: DifficultyConfig): Span {
-  const lanes = buildLanes(d);
-  const lane = lanes[0]!;
-  // 隙間の x は、次のレーンでは低い端からこれだけ離れた位置にあたる
-  const a = lane.length - lane.gap.from;
-  const b = lane.length - lane.gap.to;
-  return { from: Math.min(a, b), to: Math.max(a, b) };
-}
+export const POCKET_W = 236;
+export const POCKET_H = 96;
 
-/**
- * 成功する初速の範囲(px/s)。摩擦なしの等加速度なので閉じた式で出る。
- *
- *   手前の穴を渡りきる : v(nearHole.to) >= HOLE_CATCH_SPEED
- *   隙間で落ちる       : v(gap.to)      <  HOLE_CATCH_SPEED
- *
- * 検算とチューニングの両方で使う。実際の判定は物理を回して行う。
- */
-export function successPowerBand(d: DifficultyConfig, catchSpeed: number): Span {
-  const lane = buildLanes(d)[0]!;
-  const c2 = catchSpeed * catchSpeed;
+export function buildWinPocket(lanes: Lane[]): WinPocket {
+  const last = lanes[lanes.length - 1]!;
+  const toLeft = last.high.x < last.low.x;
+  const x = toLeft ? BOARD_LEFT + POCKET_W / 2 : BOARD_RIGHT - POCKET_W / 2;
   return {
-    from: Math.sqrt(c2 + 2 * lane.decel * lane.nearHole.to),
-    to: Math.sqrt(c2 + 2 * lane.decel * lane.gap.to),
+    center: { x, y: BOARD_BOTTOM - 18 - POCKET_H / 2 },
+    w: POCKET_W,
+    h: POCKET_H,
   };
 }
 
-export const WALL_LEFT_X = BOARD_LEFT;
-export const WALL_RIGHT_X = BOARD_RIGHT;
-export { COIN_R };
+/** ある段の低い端と、1 段下の高い端とのあいだの垂直の空き */
+export const ROW_CLEARANCE = ROW_GAP - LANE_RISE;
+
+/** 落ちたコインとレールの厚みが通れるか(検算 §1 が固定する) */
+export const ROW_CLEARANCE_NEEDED = 2 * COIN_R + LANE_THICK;
+
+/** 投入されたコインが 1 段目に出てくる位置 */
+export const ENTRY_U = SOLID_RUN * 0.45;

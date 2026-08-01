@@ -1,26 +1,24 @@
 /**
- * 全チューニング定数と共有型。
+ * 全チューニング定数と共有型。副作用のない葉ノード。
  *
- * このゲームは「上から下へ降りる」。盤面には実機の写真と同じく
- * **ななめ上向きのレーン**が段になって並んでいる。
+ * ── ゲームの芯 ────────────────────────────────────────────────
+ * 盤面には**ななめ上向きのレーン**が 5 段。重力は画面の下向き。
+ * コインはレーンの低い端(壁ぎわ)のストッパーで止まっている。
+ * レバーで弾くとレーンを**登り**、重力で減速する。
  *
- *   ・重力は画面の下向きに働く
- *   ・レーンはななめ上を向いていて、コインはその低い端(壁ぎわ)で止まっている
- *   ・レバーを弾くとコインに勢いがつき、レーンを**登って**いく
- *   ・登りながら重力の斜面成分(GRAVITY * sinθ)で減速する
- *   ・レーンには穴と隙間があり、
- *       弱すぎ  → 手前の穴を渡りきれずに落ちる(アウト)
- *       ちょうど → **隙間から落ちて 1 段下のレーンへ進める**
- *       強すぎ  → 隙間を飛び越して奥の穴に落ちる(アウト)
+ *   弱すぎ  → 手前の穴を渡りきれずに落ちる(アウト)
+ *   ちょうど → 手前の穴を渡りきり、勢いを失って**隙間から落ちる** → 1 段下へ
+ *   強すぎ  → 隙間を飛び越して奥の穴に落ちる(アウト)
  *
- * 「隙間から落ちたときだけ下の段に進める」がこのゲームの芯。
- * 落ちた先では 1 段下のレーンに乗り、そのまま滑り降りて低い端のレバーで止まる。
+ * ── 物理は Matter.js ──────────────────────────────────────────
+ * 判定用の特別なルールは持たない。レーンは実体(静的剛体)、穴と隙間は
+ * **単に床が無い区間**。落ちるか渡りきるかは剛体シミュレーションが決める。
+ * したがって「穴を渡れる速さ」は穴の幅とコインの半径から自然に決まる。
  *
- * レーンの上の運動は斜面に沿った 1 次元(位置 u と速さ v)。
- * 隙間から落ちるあいだだけ、画面下向きの重力による自由落下になる。
+ *   渡りきれる目安 : v > W / sqrt(2r/g)     (W = 穴の幅, r = コイン半径)
  *
- * このファイルは副作用を持たない葉ノードで、すべてのモジュールから参照される。
- * 数値を変更したら必ず `npm run verify` と `npm test` を実行すること。
+ * この式は当たりをつけるためだけのもの。確定値は `npm run verify` が
+ * 実際に Matter.js を回して測る。数値を変えたら必ず verify と test を通すこと。
  */
 
 // ---------------------------------------------------------------- 共通型
@@ -37,7 +35,13 @@ export interface Rect {
   h: number;
 }
 
-/** レーンの低い端(レバーのある側)がどちらの壁か */
+/** レーンに沿った区間 [from, to] (低い端からの距離) */
+export interface Span {
+  from: number;
+  to: number;
+}
+
+/** レーンの低い端(ストッパーとレバーのある側)がどちらの壁か */
 export type LaneSide = 'left' | 'right';
 
 export type DifficultyId = 'easy' | 'normal';
@@ -45,12 +49,12 @@ export type DifficultyId = 'easy' | 'normal';
 export interface DifficultyConfig {
   id: DifficultyId;
   label: string;
+  /** サブタイトル(英字)。UI の見た目用 */
+  tag: string;
   /**
-   * 手前の穴のレーンに沿った長さ。これだけが難易度差。
-   *
-   * 短いほど、渡りきるのに要る勢いが小さくて済み、そのぶん
-   * 「渡れる」と「隙間で落ちる」を両立できる幅が広がる。
-   * 同時に隙間そのものも広くなるので、見た目でも易しさが分かる。
+   * 手前の穴の幅。これだけが難易度差。
+   * 広いほど渡りきるのに要る速さが上がり、そのぶん
+   * 「渡れる」と「隙間で落ちる」を両立できるパワーの幅が狭くなる。
    */
   nearHoleSpan: number;
 }
@@ -64,67 +68,84 @@ export const MAX_DPR = 3;
 // ---------------------------------------------------------------- コイン
 
 export const COIN_R = 28;
+/**
+ * Matter 上のコインの辺の数。**偶数**であること。
+ * 奇数だと当たり判定が左右非対称になり、低い端が右の段と左の段で
+ * 成功域がずれる(検算 §2 が数値で固定している)。
+ */
+export const COIN_SIDES = 32;
 
 // ---------------------------------------------------------------- 盤面
 
-/** 盤面の壁。コインの中心はここから COIN_R 内側までしか行けない */
+/** ガラス窓(プレイフィールド)の内側 */
 export const BOARD_LEFT = 40;
 export const BOARD_RIGHT = 680;
 export const BOARD_TOP = 40;
-/** 盤面の下端。プランジャー帯を画面の 22% に抑えるためここまで広げてある */
 export const BOARD_BOTTOM = 994;
 
 export const BOARD_CENTER_X = (BOARD_LEFT + BOARD_RIGHT) / 2;
 
-/** レーンの本数 = 弾く回数。最後の 1 回であたりの口へ落ちる */
+/** レーンの本数 = 弾く回数。最後の 1 回であたりの口へ落とす */
 export const ROW_COUNT = 5;
-/** レーンからレーンまでの垂直距離(低い端どうし) */
-export const ROW_GAP = 136;
+/**
+ * 段どうしの垂直距離(低い端どうし)。
+ * `ROW_GAP - LANE_RISE` が「ある段の低い端」と「1 段下の高い端」の隙間になる。
+ * 落ちたコイン(直径 2r)とレールの厚みが通る余裕が要るので、
+ *   ROW_GAP - LANE_RISE > 2 * COIN_R + LANE_THICK
+ * を満たすこと(検算 §1 が数値で固定している)。
+ */
+export const ROW_GAP = 146;
 /** 1 段目のレーンの低い端の y */
 export const ROW_TOP_Y = 248;
 
 /**
- * レーンの端の x。低い端(レバー側)と高い端が壁ぎわで左右に入れ替わる。
- * 段ごとに低い端が右・左・右…と交互になるので、レバーも交互に並ぶ。
- */
-export const LANE_INSET = 68;
-export const LANE_LEFT_X = BOARD_LEFT + LANE_INSET;
-export const LANE_RIGHT_X = BOARD_RIGHT - LANE_INSET;
-/** レーン 1 本ぶんの水平距離 */
-export const LANE_SPAN_X = LANE_RIGHT_X - LANE_LEFT_X;
-/**
- * レーンの高低差。低い端から高い端までにこれだけ登る。
- * 斜面に沿った減速は GRAVITY * sinθ なので、この値が「登りにくさ」を決める。
+ * レーンは**画面の左右の端まで**伸びる。実機の写真と同じで、
+ * 低い端は壁そのもの。壁がストッパーを兼ね、その横からレバーが生えている。
  *
- * 上限は段どうしが重ならないこと:
- *   ROW_GAP > LANE_RISE + レーンの太さ(LANE_W + LANE_RAIL*2)
- * 実機の写真のレーンもゆるい傾きなので、見た目としてもこのくらいが近い。
+ * ここに余白を作ってはいけない。隙間から落ちたコインは勢いを持ったまま
+ * 高い端の側へ飛ぶので、レーンの端と壁のあいだに空きがあると
+ * **そこへ落ちて詰む**(弾くこともできず結果も出ない)。
  */
+export const LANE_LEFT_X = BOARD_LEFT;
+export const LANE_RIGHT_X = BOARD_RIGHT;
+export const LANE_SPAN_X = LANE_RIGHT_X - LANE_LEFT_X;
+/** レーンの高低差。傾き sinθ = LANE_RISE / レーン長 が減速の強さを決める */
 export const LANE_RISE = 60;
-/** レーンの見た目の幅(溝)。コインはこの中を走る */
-export const LANE_W = 62;
-/** レーンの縁(枠)の太さ */
-export const LANE_RAIL = 6;
+/** レール(実体)の厚み */
+export const LANE_THICK = 16;
+/** レールの見た目の幅(溝の見え幅)。当たり判定には使わない */
+export const LANE_FACE = 26;
 
 /**
- * レーンに沿った位置(低い端からの距離 u)で見た、穴と隙間の配置。
- * どの段もまったく同じ配置なので、5 回の操作の条件が完全に一致する。
+ * レーンに沿った位置(低い端からの距離 u)で見た、床と落とし口の配置。
+ * 5 段すべて完全に同じなので、5 回の操作の条件が一致する。
  *
- *   u = 0                 低い端。レバーがあり、コインはここで止まる
- *   [0, HOLE_NEAR_U]      実線。1 段上から落ちてきたコインが滑り降りてくる区間
- *   手前の穴 (nearHoleSpan) 勢いが足りないとここに落ちる(弱すぎ)
- *   実線 (GAP_LEAD_U)
- *   隙間 → GAP_END_U      **ここから落ちると 1 段下へ進める**
- *   奥の穴 → 高い端        隙間を飛び越すとここに落ちる(強すぎ)
+ *   u = 0                     低い端。ストッパーとレバー
+ *   [0, SOLID_RUN]            レール(実体)。ここだけが床
+ *   [SOLID_RUN, ...]          **ここから先は床が無い**。ひと続きの落とし口
+ *      ├ 手前の穴 (nearHoleSpan)   弱すぎるとここへ落ちる
+ *      ├ 隙間 (… GAP_END_U)        **ここへ落ちると 1 段下へ進める**
+ *      └ 奥の穴 (… レーン長)       強すぎるとここへ落ちる
  *
- * HOLE_NEAR_U は「落ちてきたコインの着地点」より先になければならない。
- * 手前にあると、着地したコインが滑り降りる途中で自分から穴に落ちてしまう(検算 §1)。
+ * ── なぜ落とし口をひと続きにするか ──────────────────────────
+ * 穴と穴のあいだにレールを挟むと、飛び越したコインが必ず**その先の縁に
+ * 着地する**。縁は当たりどころで失う速度がまるで違うので、
+ * 「もう少し強く弾いたのに手前の穴に落ちた」という飛び地ができる。
+ * 実測では 943 px/s のコインが縁に当たって 402 px/s まで落ちていた。
+ *
+ * レールの端を離れたあと何にも触れないようにすると、落ちる位置は
+ *
+ *     Δu = v・t − (1/2)・g sinθ・t²   ,  t = sqrt(2・(COIN_R + PIT_DEPTH)/(g cosθ))
+ *
+ * という単調な式になり、弾く力に対して 弱すぎ → ちょうど → 強すぎ が
+ * きれいに並ぶ。見た目は 3 つの落とし口をリブで区切って描き分ける。
  */
-export const HOLE_NEAR_U = 230;
-/** 手前の穴の終わりから隙間の始まりまでの実線 */
-export const GAP_LEAD_U = 20;
-/** 隙間の終わり。ここから先が奥の穴 */
-export const GAP_END_U = 440;
+export const SOLID_RUN = 300;
+/**
+ * レールの端から「隙間の終わり」までの距離。
+ * これを超えて飛ぶと奥の穴、つまり強すぎ。難易度によらず共通。
+ */
+export const MAX_REACH = 200;
 
 // ---------------------------------------------------------------- 物理
 
@@ -132,139 +153,163 @@ export const FIXED_DT = 1 / 60;
 /** タブ復帰時のスパイラル防止 */
 export const MAX_FRAME_TIME = 0.25;
 /**
- * 1 サブステップあたりの最大移動量 (px)。
- * これを超えないよう 1 フレームを分割して積分し、
- * 高速時に穴や隙間を飛ばして見落とすことを防ぐ。
+ * 1 フレームを Matter.js に何回に分けて渡すか。
+ * 高速のコインがレールの角をすり抜けないよう細かく刻む。
  */
-export const MAX_SUBSTEP_MOVE = 6;
+export const PHYS_SUBSTEPS = 5;
 
-/** 重力。画面の下向きに働く。斜面の減速も落下もこれ 1 つから決まる */
-export const GRAVITY = 2200; // px/s^2
+/** 重力 (px/s^2)。画面の下向き */
+export const GRAVITY = 2200;
 
+/** コインの材質。跳ね返りは 0(§4.2 のとおり跳ねるとルールが崩れる) */
+export const COIN_RESTITUTION = 0;
 /**
- * 穴や隙間の上をこの速さ未満で通ると落ちる。
- * 勢いがあれば口をかすめて渡れる、というのがこのゲームの判定の芯。
- *   手前の穴を渡りきれない → 弱すぎ
- *   隙間を渡りきってしまう → 強すぎ(奥の穴へ)
+ * 摩擦は 0。plan §4.2 のとおりレールの上では重力の斜面成分だけが効く。
+ *
+ * Matter の摩擦は物理的なクーロン摩擦ではなく、接線速度が小さいと
+ * **その場で速度をまるごと消す**近似が入っている。0.02 でも実測で
+ * 2700 px/s^2 という現実にありえない減速になり、登れる距離が
+ * 弾く力に対して単調でなくなった。0 にすると減速は g・sinθ ちょうどになる。
  */
-export const HOLE_CATCH_SPEED = 200;
+export const COIN_FRICTION = 0;
+export const COIN_FRICTION_STATIC = 0;
+export const COIN_DENSITY = 0.004;
+/**
+ * コインの回転は物理では持たない(慣性モーメント無限大の「パック」)。
+ * 転がりを剛体で解くと、穴の縁に当たったときのスピンと並進の交換が
+ * 支配的になり、結果が初速に対して単調でなくなる。
+ * 見た目の回転は進んだ距離から描画側で作るので、絵は何も変わらない。
+ */
+export const COIN_LOCK_SPIN = true;
+
+/** ストッパーに触れていてこの速さを下回ったら「構え」に入る (px/s) */
+export const REST_SPEED = 26;
 
 // ---------------------------------------------------------------- 弾き
 
 /**
- * 弾く力 = 斜面に沿った初速 (px/s)。手で決めず §5.3 の手順で逆算する。
- * 弱すぎると手前の穴に落ち、強すぎると隙間を飛び越して奥の穴に落ちる。
+ * 弾く力 = 斜面に沿った初速 (px/s)。
+ * 手で決めず、`npm run verify` の掃引結果から逆算する(§5)。
  */
-export const P_MIN = 402;
-export const P_MAX = 537;
-export const FLICK_COOLDOWN = 0.35; // s
-/** レバーのはたきアニメの長さ */
-export const LEVER_SWING_TIME = 0.22; // s
-/** プランジャーを離してからレバーがコインに当たるまでの間 */
-export const LEVER_HIT_DELAY = 0.06; // s
+export const P_MIN = 525;
+export const P_MAX = 1096;
+export const FLICK_COOLDOWN = 0.3; // s
+export const LEVER_SWING_TIME = 0.2; // s
 
 // ---------------------------------------------------------------- プランジャー
 
-export const KNOB_REST: Vec2 = { x: 560, y: 1040 };
-export const KNOB_R = 46;
-/** 指の移動量。画面下端までちょうど届く */
+export const KNOB_REST: Vec2 = { x: 566, y: 1046 };
+export const KNOB_R = 44;
+/** 指の移動量 */
 export const STROKE_FINGER = 240;
 /** ノブの見た目の移動量。引ききってもノブが画面内に残るよう指より小さい */
-export const STROKE_KNOB = 190;
-export const PULL_DEADZONE = 0.05;
+export const STROKE_KNOB = 178;
+export const PULL_DEADZONE = 0.04;
 /** 離してから戻りきるまで (s) */
-export const KNOB_RETURN = 0.15;
-/** 掴み領域。ノブより大幅に広く取り、3歳児が掴み損ねないようにする */
-export const GRAB_ZONE: Rect = { x: 300, y: 996, w: 420, h: 284 };
+export const KNOB_RETURN = 0.13;
+/** 掴み領域。ノブより広く取る */
+export const GRAB_ZONE: Rect = { x: 330, y: 1000, w: 390, h: 280 };
+
+/** パワーメーター(プランジャー帯の左側) */
+export const METER: Rect = { x: 56, y: 1024, w: 78, h: 224 };
 
 // ---------------------------------------------------------------- UI
 
-export const GIVEUP_CENTER: Vec2 = { x: 108, y: 108 };
-export const GIVEUP_R = 42;
-export const GIVEUP_CANCEL_R = 84;
-export const GIVEUP_HOLD = 1.0; // s
-export const GIVEUP_RING_DELAY = 0.2; // s
-export const GUIDE_IDLE_DELAY = 2.0; // s
-export const RESULT_INPUT_DELAY = 0.8; // s
+export const GIVEUP_CENTER: Vec2 = { x: 96, y: 100 };
+export const GIVEUP_R = 28;
+export const GIVEUP_CANCEL_R = 76;
+export const GIVEUP_HOLD = 0.8; // s
+export const GUIDE_IDLE_DELAY = 3.0; // s
+export const RESULT_INPUT_DELAY = 0.6; // s
 /** ボタンの当たり判定を見た目より広げる量 */
-export const BUTTON_PADDING = 20;
+export const BUTTON_PADDING = 18;
 
 // ---------------------------------------------------------------- 演出
 
-export const INSERT_ANIM = 1.4; // s
-export const FALL_ANIM = 1.0; // s
-export const WIN_ANIM = 1.5; // s
+export const INSERT_ANIM = 1.2; // s
+export const FALL_ANIM = 0.9; // s
+export const WIN_ANIM = 1.4; // s
 export const STAMP_ANIM = 0.6; // s
-/** 着地のつぶれ(スカッシュ)演出の長さ */
-export const LAND_SQUASH_TIME = 0.14; // s
 
 /** コイン投入口。盤面の右上 */
-export const COIN_SLOT_CENTER: Vec2 = { x: 618, y: 96 };
-export const COIN_SLOT_SIZE = { w: 118, h: 84 } as const;
+export const COIN_SLOT_CENTER: Vec2 = { x: 606, y: 96 };
+export const COIN_SLOT_SIZE = { w: 116, h: 78 } as const;
 
 // ---------------------------------------------------------------- 難易度
 
 export const DIFFICULTIES: Record<DifficultyId, DifficultyConfig> = {
-  easy: { id: 'easy', label: 'やさしい', nearHoleSpan: 60 },
-  normal: { id: 'normal', label: 'ふつう', nearHoleSpan: 130 },
+  easy: { id: 'easy', label: 'やさしい', tag: 'CASUAL', nearHoleSpan: 120 },
+  normal: { id: 'normal', label: 'ほんき', tag: 'EXPERT', nearHoleSpan: 163 },
 };
 
 // ---------------------------------------------------------------- 色
 
+/**
+ * 大人が長く眺めても疲れない、暗色ベースの「据置アーケード筐体」。
+ * 濃紺のプレイフィールドに真鍮のレール、要素の意味は色ではなく
+ * 形(丸い穴 / 開いた隙間 / 下向きの矢羽根)でも分かるようにする。
+ */
 export const COLORS = {
-  sky: '#8FD3F4',
-  skyTop: '#BDE9FF',
-  sun: '#FFE066',
-  cloud: '#FFFFFF',
-  mountain: '#8CC63F',
-  mountainHi: '#B5E061',
-  mountainSh: '#5FA32A',
+  // 画面の外側(レターボックス)
+  room: '#0B0D12',
+  roomGlow: '#1A2030',
 
-  // 筐体(実機の赤いキャビネット)
-  cabinet: '#D8452F',
-  cabinetDark: '#A93223',
-  cabinetTrim: '#F2B33D',
-  cabinetTrimDark: '#C98F1E',
+  // 筐体
+  shell: '#1C212C',
+  shellHi: '#2A3140',
+  shellLo: '#11141B',
+  bezel: '#C8A15A',
+  bezelHi: '#F0D9A0',
+  bezelLo: '#8A6C33',
+  screw: '#6B7180',
 
-  // 盤面の化粧板
-  boardFace: '#FFF3CF',
-  boardFaceDeep: '#F5DE9E',
+  // プレイフィールド
+  field: '#132030',
+  fieldDeep: '#0A1220',
+  fieldPrint: '#1E3348',
+  fieldGlow: '#2C6B8F',
 
-  // レーン(コインが走る溝)
-  laneRail: '#F5B04C',
-  laneFloor: '#C97F23',
-  laneShine: '#FFE0A8',
-  laneEdge: '#6B4423',
+  // レール(真鍮)
+  railHi: '#F3D79A',
+  rail: '#C9A059',
+  railLo: '#7E6130',
+  railEdge: '#4A391C',
 
-  lever: '#E8503A',
-  leverDark: '#B23324',
+  // 進める隙間
+  gap: '#3DD8C4',
+  gapDim: '#1B7F76',
 
-  // 進める隙間(アウトの穴とはっきり違う色にする)
-  gapRing: '#4FBF6A',
-  gapRingDark: '#2E9A4A',
+  // アウトの穴
+  hole: '#05080C',
+  holeRim: '#E2603A',
+  holeRimLo: '#8C3418',
 
-  // 丸穴(こげ茶の落とし穴+オレンジのリム)
-  hole: '#2A1B0C',
-  holePit: '#120B04',
-  holeRing: '#FF7A2F',
-  holeRingDark: '#D65A17',
+  // コイン
+  coinHi: '#FFF0BE',
+  coinMid: '#E8B54B',
+  coinLo: '#9A6C1E',
+  coinEdge: '#5C3E0E',
 
-  coinRim: '#F5C242',
-  coinFace: '#FFF3D0',
-  pocket: '#F5C242',
-  pocketDark: '#D9A227',
-  flagRed: '#E8503A',
-  ink: '#3B2A1A',
-  panel: '#FFF8EC',
-  panelEdge: '#3B2A1A',
-  accent: '#FF8A3D',
-  disabled: '#C9C2B6',
+  // あたりの口
+  pocket: '#3DD8C4',
+  pocketLo: '#166257',
+
+  lever: '#D8DEE9',
+  leverLo: '#79808F',
+
+  // 文字と UI
+  text: '#E9EEF7',
+  textDim: '#8B95A8',
+  ink: '#080A0F',
+  good: '#3DD8C4',
+  weak: '#E8B54B',
+  strong: '#E2603A',
+  accent: '#F0D9A0',
 } as const;
 
-/** 輪郭線の太さ。3歳児の視認性のため細くしない */
-export const LINE_W = 4;
+export const LINE_W = 3;
 
-// ---------------------------------------------------------------- どうぶつ
+// ---------------------------------------------------------------- メダルの意匠
 
 export type AnimalKind =
   | 'usagi'
@@ -291,3 +336,16 @@ export const ANIMALS: readonly AnimalKind[] = [
   'pengin',
   'raion',
 ];
+
+export const ANIMAL_LABELS: Record<AnimalKind, string> = {
+  usagi: 'うさぎ',
+  kuma: 'くま',
+  panda: 'ぱんだ',
+  risu: 'りす',
+  neko: 'ねこ',
+  inu: 'いぬ',
+  zou: 'ぞう',
+  kirin: 'きりん',
+  pengin: 'ぺんぎん',
+  raion: 'らいおん',
+};
