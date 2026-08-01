@@ -9,8 +9,6 @@ import {
   GRAB_ZONE,
   KNOB_REST,
   KNOB_RETURN,
-  P_MAX,
-  P_MIN,
   PULL_DEADZONE,
   STROKE_FINGER,
   STROKE_KNOB,
@@ -44,10 +42,6 @@ export function createPlunger(): PlungerState {
     cooldown: 0,
     idleTime: 0,
   };
-}
-
-export function pullToPower(pull: number): number {
-  return P_MIN + (P_MAX - P_MIN) * pull;
 }
 
 function inGrabZone(p: Vec2): boolean {
@@ -84,7 +78,8 @@ export function plungerPointerMove(st: PlungerState, p: Vec2): void {
 
 /**
  * 指を離した瞬間に発射。pointerup / pointercancel どちらでも呼ぶ。
- * 発射したら power を返す。引き量が極小なら null(誤タップで空撃ちしない)。
+ * 発射したら引き量 0..1 を返す。極小なら null(誤タップで空撃ちしない)。
+ * 力への換算は難易度ごとに違うので、呼び出し側が `pullToPower` でおこなう。
  */
 export function plungerPointerUp(st: PlungerState): number | null {
   if (!st.grabbed) return null;
@@ -95,7 +90,7 @@ export function plungerPointerUp(st: PlungerState): number | null {
   st.idleTime = 0;
   if (pull < PULL_DEADZONE) return null;
   st.cooldown = FLICK_COOLDOWN;
-  return pullToPower(pull);
+  return pull;
 }
 
 export function updatePlunger(st: PlungerState, dt: number): void {

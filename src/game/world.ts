@@ -27,13 +27,16 @@ import {
   COIN_R,
   COIN_RESTITUTION,
   COIN_SIDES,
+  FIN_T,
   FIXED_DT,
+  FLOOR_T,
   GRAVITY,
   LANE_THICK,
   PHYS_SUBSTEPS,
+  PIT_DEPTH,
   type Vec2,
 } from '../config.ts';
-import { laneP, type Lane, type WinPocket } from './board.ts';
+import { BACKSTOP_TOP, laneP, type Lane, type WinPocket } from './board.ts';
 
 const { Bodies, Body, Composite, Engine, Sleeping } = Matter;
 
@@ -50,6 +53,7 @@ const WALL_T = 120;
 /** レール端の丸め。角が立っているとコインが引っかかる */
 const RAIL_CHAMFER = 6;
 
+
 export interface PhysWorld {
   engine: Matter.Engine;
   coin: Matter.Body;
@@ -64,30 +68,83 @@ function staticBox(
   h: number,
   angle = 0,
   chamfer?: number,
+  friction = 0,
 ): Matter.Body {
-  return Bodies.rectangle(x, y, w, h, {
+  const body = Bodies.rectangle(x, y, w, h, {
     isStatic: true,
     angle,
-    friction: 0,
-    frictionStatic: 0,
     restitution: 0,
     ...(chamfer !== undefined ? { chamfer: { radius: chamfer } } : {}),
   });
+  return setFriction(body, friction);
 }
 
 /**
- * レーン 1 本ぶんの実体。床のあるレールだけ。
- * 低い端は画面の壁に接しているので、ストッパーは要らない(壁が受ける)。
+ * 静的ボディの摩擦は**生成後に入れ直す**。
+ * Matter の `Body.setStatic(body, true)` は friction を 1 に上書きするので、
+ * `Bodies.rectangle` のオプションに書いても消される。
+ * これに気づかず、レールにも摩擦が乗って
+ * 700 px/s のコインが 15px 進んで止まっていた。
+ */
+function setFriction(body: Matter.Body, friction: number): Matter.Body {
+  body.friction = friction;
+  body.frictionStatic = friction;
+  return body;
+}
+
+/**
+ * レーン 1 本ぶんの実体。
+ *
+ *   ・レール(床)
+ *   ・レールの下の背板
+ *   ・手前のポケットの底 / 奥のポケットの底(落とし穴のところだけ底が無い)
+ *   ・ポケットを分ける薄いフィン 2 枚
+ *
+ * 低い端も高い端も画面の壁に接しているので、ストッパーは要らない。
+ * 傾いた面はレーンそのもの以外に 1 つも無い。上を向いた角が飛行経路の
+ * 近くにあると、かすめたコインを上へ跳ね上げてしまうため(`config.ts` 参照)。
  */
 function laneBodies(lane: Lane): Matter.Body[] {
   const out: Matter.Body[] = [];
-  for (const s of lane.solids) {
-    const len = s.to - s.from;
-    if (len <= 1) continue;
-    const c = laneP(lane, (s.from + s.to) / 2, -LANE_THICK / 2);
-    out.push(staticBox(c.x, c.y, len, LANE_THICK, lane.angle, Math.min(RAIL_CHAMFER, len / 2 - 1)));
-  }
+
+  // レール
+  const railLen = lane.rail.to - lane.rail.from;
+  const rc = laneP(lane, railLen / 2, -LANE_THICK / 2);
+  out.push(staticBox(rc.x, rc.y, railLen, LANE_THICK, lane.angle, RAIL_CHAMFER));
+
+  const weak = lane.bins[0]!;
+  const good = lane.bins[1]!;
+  const strong = lane.bins[2]!;
+
+  /*
+   * レールの下の背板。ポケットの底はレーンと平行なので、落ちたコインは
+   * 坂を下って低い端の側へ滑る。これが無いと窪みの手前端から抜け落ちて、
+   * 穴を通ったのと同じ深さまで行ってしまう(実測で「弱すぎ」が
+   * 「ちょうど」と判定された)。レールの真下なので飛ぶコインには当たらない。
+   */
+  out.push(fin(lane, weak.from, BACKSTOP_TOP));
+  out.push(floor(lane, weak.from, weak.to));
+
+  // 窪みを 3 つに分ける 2 枚のフィン。ここだけが上を向いた面
+  out.push(fin(lane, good.from, lane.rim));
+  out.push(fin(lane, good.to, lane.rim));
+
+  // 落とし穴 [good.from, good.to] には底を置かない。そのまま 1 段下へ抜ける
+  out.push(floor(lane, strong.from, strong.to));
+
   return out;
+}
+
+/** ポケットの底。レーンと平行 */
+function floor(lane: Lane, from: number, to: number): Matter.Body {
+  const c = laneP(lane, (from + to) / 2, -(PIT_DEPTH + FLOOR_T / 2));
+  return staticBox(c.x, c.y, to - from, FLOOR_T, lane.angle);
+}
+
+/** 底から立つ薄い仕切り。top = 頂点の深さ */
+function fin(lane: Lane, u: number, top: number): Matter.Body {
+  const c = laneP(lane, u, -(top + PIT_DEPTH) / 2);
+  return staticBox(c.x, c.y, FIN_T, PIT_DEPTH - top, lane.angle);
 }
 
 /** あたりの口。落ちてきたコインを受け止めるカップ(壁ぎわの床) */

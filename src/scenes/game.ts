@@ -22,6 +22,7 @@ import {
   GIVEUP_HOLD,
   GUIDE_IDLE_DELAY,
   INSERT_ANIM,
+  DIFFICULTIES,
   LOGICAL_W,
   LOGICAL_H,
   ROW_COUNT,
@@ -43,6 +44,7 @@ import {
   createCoin,
   depthOf,
   flickCoin,
+  pullToPower,
   resetToEntry,
   stepCoin,
   type CoinState,
@@ -86,7 +88,6 @@ import {
   drawGapChevrons,
   drawLever,
   drawLeverKnob,
-  drawPitLip,
   drawPits,
   drawRail,
   drawWinPocket,
@@ -114,7 +115,7 @@ const SINK_TIME = 0.9;
 const DECK_COL = 300;
 
 export class GameScene implements Scene {
-  private difficulty: DifficultyConfig = { id: 'easy', label: '', tag: '', nearHoleSpan: 0 };
+  private difficulty: DifficultyConfig = DIFFICULTIES.easy;
   private lanes: Lane[] = [];
   private pocket: WinPocket = { center: { x: 0, y: 0 }, w: 0, h: 0 };
   private coin: CoinState | null = null;
@@ -144,7 +145,7 @@ export class GameScene implements Scene {
   enter(params: unknown): void {
     const p = params as GameParams | undefined;
     if (p?.difficulty) this.difficulty = p.difficulty;
-    this.lanes = buildLanes(this.difficulty);
+    this.lanes = buildLanes();
     this.pocket = buildWinPocket(this.lanes);
     this.coin = createCoin(this.lanes, this.pocket);
     resetToEntry(this.coin);
@@ -279,9 +280,8 @@ export class GameScene implements Scene {
         break;
       case 'up':
       case 'cancel': {
-        const pull = this.plunger.pull;
-        const power = plungerPointerUp(this.plunger);
-        if (power !== null) this.fire(power, pull);
+        const pull = plungerPointerUp(this.plunger);
+        if (pull !== null) this.fire(pullToPower(pull, this.difficulty.powerMax), pull);
         break;
       }
     }
@@ -421,19 +421,14 @@ export class GameScene implements Scene {
       return;
     }
 
+    /*
+     * 負けの演出のあいだも物理は回り続けていて、コインは実際に
+     * ポケットの底で止まっている。位置をいじる必要はなく、
+     * 沈みの深さだけを渡して絵を暗くする。
+     */
     const sink = coin.phase === 'lost' ? clamp01(1 - coin.timer / SINK_TIME) : 0;
-    const at = coin.lostAt;
-    const pos: Vec2 =
-      at && sink > 0
-        ? {
-            x: coin.pos.x + (at.x - coin.pos.x) * sink,
-            y: coin.pos.y + (at.y - coin.pos.y) * sink + sink * 20,
-          }
-        : coin.pos;
+    drawCoin(ctx, { pos: coin.pos, spin: coin.spin, animal: this.animal, sink, vel: coin.vel });
 
-    drawCoin(ctx, { pos, spin: coin.spin, animal: this.animal, sink, vel: coin.vel });
 
-    // 落ちた穴の手前側の縁をコインの上に重ね、穴に入っていくように見せる
-    if (coin.phase === 'lost' && at) drawPitLip(ctx, at, COLORS.holeRim);
   }
 }

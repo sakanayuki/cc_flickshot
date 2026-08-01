@@ -6,28 +6,34 @@ import { describe, expect, it } from 'vitest';
 import {
   FIXED_DT,
   GRAB_ZONE,
+  DIFFICULTIES,
   KNOB_REST,
-  P_MAX,
   P_MIN,
   PULL_DEADZONE,
   STROKE_FINGER,
   STROKE_KNOB,
 } from '../config.ts';
+import { pullToPower } from './coin.ts';
 import {
   createPlunger,
   plungerPointerDown,
   plungerPointerMove,
   plungerPointerUp,
-  pullToPower,
   updatePlunger,
 } from './plunger.ts';
+
+const P_MAX = DIFFICULTIES.easy.powerMax;
 
 const INSIDE = { x: GRAB_ZONE.x + 10, y: GRAB_ZONE.y + 10 };
 
 describe('pull → power ', () => {
-  it('pull = 0 で P_MIN', () => expect(pullToPower(0)).toBe(P_MIN));
-  it('pull = 1 で P_MAX', () => expect(pullToPower(1)).toBe(P_MAX));
-  it('pull = 0.5 で中間', () => expect(pullToPower(0.5)).toBe((P_MIN + P_MAX) / 2));
+  it('pull = 0 で P_MIN', () => expect(pullToPower(0, P_MAX)).toBe(P_MIN));
+  it('pull = 1 で難易度の上限', () => expect(pullToPower(1, P_MAX)).toBe(P_MAX));
+  it('pull = 0.5 で中間', () => expect(pullToPower(0.5, P_MAX)).toBe((P_MIN + P_MAX) / 2));
+  it('難易度が上がると同じ引きでも力が強い', () =>
+    expect(pullToPower(0.5, DIFFICULTIES.normal.powerMax)).toBeGreaterThan(
+      pullToPower(0.5, DIFFICULTIES.easy.powerMax),
+    ));
 });
 
 describe('プランジャーの入力', () => {
@@ -79,13 +85,14 @@ describe('プランジャーの入力', () => {
     expect(plungerPointerUp(st)).toBeNull();
   });
 
-  it('デッドゾーンぎりぎりなら発射する', () => {
+  it('デッドゾーンを少しでも超えたら発射する', () => {
     const st = createPlunger();
     plungerPointerDown(st, INSIDE, 1);
-    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * PULL_DEADZONE });
-    const power = plungerPointerUp(st);
-    expect(power).not.toBeNull();
-    expect(power!).toBeGreaterThan(P_MIN);
+    // ちょうど境界だと丸め誤差でどちらに転ぶか決まらないので、わずかに超えさせる
+    plungerPointerMove(st, { x: INSIDE.x, y: INSIDE.y + STROKE_FINGER * PULL_DEADZONE + 0.5 });
+    const pull = plungerPointerUp(st);
+    expect(pull).not.toBeNull();
+    expect(pullToPower(pull!, P_MAX)).toBeGreaterThan(P_MIN);
   });
 
   it('掴んでいなければ発射しない', () => {

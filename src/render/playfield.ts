@@ -13,7 +13,10 @@ import {
   BOARD_TOP,
   COIN_R,
   COLORS,
+  FIN_T,
+  FLOOR_T,
   LANE_THICK,
+  PIT_DEPTH,
   type AnimalKind,
   type Vec2,
 } from '../config.ts';
@@ -34,8 +37,6 @@ import {
   type Ctx,
 } from './shapes.ts';
 
-/** 落とし口の見た目の深さ */
-const MOUTH_H = 46;
 /** レバー(キッカー)の見た目 */
 const KICK_W = 30;
 const KICK_H = 30;
@@ -107,99 +108,117 @@ export function drawField(ctx: Ctx): void {
 
 // ---------------------------------------------------------------- レーン
 
-interface Zone {
-  from: number;
-  to: number;
-  color: string;
-  /** 進める口かどうか */
-  good: boolean;
-}
-
-function zonesOf(lane: Lane): Zone[] {
-  return [
-    { from: lane.nearHole.from, to: lane.nearHole.to, color: COLORS.holeRim, good: false },
-    { from: lane.gap.from, to: lane.gap.to, color: COLORS.gap, good: true },
-    { from: lane.farHole.from, to: lane.farHole.to, color: COLORS.holeRim, good: false },
-  ];
-}
-
 /**
- * 落とし口。レールが切れたところから高い端まで、床が無いことを見せる。
- * 3 つの区間を色と縁取りで描き分ける(アウト / 進める / アウト)。
+ * 窪み。レールが切れたところから高い端まで、床の無い区間を見せる。
+ *
+ * 実体とまったく同じ形で描く。手前と奥にはポケットの底があり、
+ * まん中(落とし穴)だけ底が無い。3 つを分けているのは 2 枚のフィンで、
+ * その頂点の深さ `lane.rim` が「どれだけ沈まずに飛べば抜けられるか」
+ * そのものなので、段が下るほどフィンが低く(深く)見える。
  *
  * ここは動かないのでキャッシュ側で 1 度だけ描く。
  * 流れる矢羽根だけ `drawGapChevrons` で毎フレーム重ねる。
  */
 export function drawPits(ctx: Ctx, lane: Lane): void {
-  inLane(ctx, lane, () => {
-    for (const z of zonesOf(lane)) {
-      const w = z.to - z.from;
+  const weak = lane.bins[0]!;
+  const good = lane.bins[1]!;
+  const strong = lane.bins[2]!;
 
-      // 口の中。ほとんど黒く落とし、縁のところだけ色を乗せる
-      roundRect(ctx, z.from, -2, w, MOUTH_H, 8);
-      ctx.fillStyle = vGrad(ctx, -2, MOUTH_H - 2, [
-        [0, alpha(z.color, 0.3)],
-        [0.16, alpha(COLORS.hole, 0.86)],
-        [1, COLORS.hole],
+  inLane(ctx, lane, () => {
+    const left = weak.from;
+    const right = strong.to;
+
+    // 窪み全体の内側。奥へ行くほど暗い
+    roundRect(ctx, left, -2, right - left, PIT_DEPTH + 2, 8);
+    ctx.fillStyle = vGrad(ctx, -2, PIT_DEPTH, [
+      [0, alpha(COLORS.fieldDeep, 0.9)],
+      [0.35, alpha(COLORS.hole, 0.92)],
+      [1, COLORS.hole],
+    ]);
+    ctx.fill();
+
+    // 落とし穴だけは底が抜けている。下まで black + 進める色の光
+    ctx.save();
+    roundRect(ctx, left, -2, right - left, PIT_DEPTH + 2, 8);
+    ctx.clip();
+    ctx.fillStyle = vGrad(ctx, -2, PIT_DEPTH + 20, [
+      [0, alpha(COLORS.gap, 0.16)],
+      [0.5, alpha(COLORS.hole, 0.9)],
+      [1, COLORS.hole],
+    ]);
+    ctx.fillRect(good.from, -2, good.to - good.from, PIT_DEPTH + 22);
+    ctx.restore();
+
+    // 手前と奥のポケットの底(= コインが乗る棚)
+    for (const b of [weak, strong]) {
+      roundRect(ctx, b.from, PIT_DEPTH, b.to - b.from, FLOOR_T, 3);
+      ctx.fillStyle = vGrad(ctx, PIT_DEPTH, PIT_DEPTH + FLOOR_T, [
+        [0, alpha(COLORS.railLo, 0.95)],
+        [1, alpha(COLORS.railEdge, 0.95)],
       ]);
       ctx.fill();
+      paint(ctx, null, alpha('#000000', 0.6), 1);
 
-      // 口の内側に落ちる影。奥行きが出て「開いている」と分かる
-      ctx.beginPath();
-      ctx.moveTo(z.from + 3, 3);
-      ctx.lineTo(z.to - 3, 3);
-      ctx.strokeStyle = alpha('#000000', 0.75);
-      ctx.lineWidth = 6;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-
-      // 縁
+      // 色に頼らず形でも「行き止まり」と分かるよう、底に斜線を敷く
       ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(z.from + 2, -2);
-      ctx.lineTo(z.to - 2, -2);
-      ctx.strokeStyle = z.color;
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
-      ctx.shadowColor = z.color;
-      ctx.shadowBlur = z.good ? 16 : 7;
-      ctx.stroke();
-      ctx.restore();
-
-      if (!z.good) {
-        // アウトの口は斜線で塞ぐ。色に頼らず形でも見分けられるようにする
-        ctx.save();
-        roundRect(ctx, z.from, -2, w, MOUTH_H, 8);
-        ctx.clip();
-        for (let x = z.from - MOUTH_H; x < z.to + MOUTH_H; x += 18) {
-          ctx.beginPath();
-          ctx.moveTo(x, MOUTH_H);
-          ctx.lineTo(x + MOUTH_H * 0.7, 0);
-          ctx.strokeStyle = alpha(z.color, 0.16);
-          ctx.lineWidth = 4;
-          ctx.stroke();
-        }
-        ctx.restore();
+      roundRect(ctx, b.from, PIT_DEPTH - 16, b.to - b.from, 16, 2);
+      ctx.clip();
+      for (let x = b.from - 16; x < b.to + 16; x += 14) {
+        ctx.beginPath();
+        ctx.moveTo(x, PIT_DEPTH);
+        ctx.lineTo(x + 12, PIT_DEPTH - 16);
+        ctx.strokeStyle = alpha(COLORS.holeRim, 0.28);
+        ctx.lineWidth = 3;
+        ctx.stroke();
       }
+      ctx.restore();
     }
 
-    // 区間の境目の仕切り。奥の壁に立つリブとして描く(床ではない)
-    for (const u of [lane.nearHole.to, lane.gap.to]) {
-      roundRect(ctx, u - 3, 0, 6, MOUTH_H - 6, 3);
-      paint(ctx, alpha(COLORS.railLo, 0.7), alpha('#000000', 0.7), 1);
+    // フィン 2 枚。頂点の高さがそのまま難しさ
+    for (const u of [good.from, good.to]) {
+      roundRect(ctx, u - FIN_T / 2, lane.rim, FIN_T, PIT_DEPTH - lane.rim, FIN_T / 2);
+      ctx.fillStyle = vGrad(ctx, lane.rim, PIT_DEPTH, [
+        [0, COLORS.railHi],
+        [0.3, COLORS.rail],
+        [1, COLORS.railLo],
+      ]);
+      ctx.fill();
+      paint(ctx, null, alpha(COLORS.railEdge, 0.9), 1.2);
     }
+
+    // 窪みの上端。レール面の高さに 1 本通しておくと縁が読める
+    ctx.beginPath();
+    ctx.moveTo(left, -1);
+    ctx.lineTo(right, -1);
+    ctx.strokeStyle = alpha(COLORS.railLo, 0.8);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 進める口の縁だけ光らせる
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(good.from, lane.rim);
+    ctx.lineTo(good.to, lane.rim);
+    ctx.strokeStyle = COLORS.gap;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = COLORS.gap;
+    ctx.shadowBlur = 14;
+    ctx.stroke();
+    ctx.restore();
   });
 }
 
 /** 進める隙間を流れる下向きの矢羽根。ここだけ毎フレーム描く */
 export function drawGapChevrons(ctx: Ctx, lane: Lane, t: number): void {
+  const good = lane.bins[1]!;
   inLane(ctx, lane, () => {
-    const cx = (lane.gap.from + lane.gap.to) / 2;
+    const cx = (good.from + good.to) / 2;
     ctx.lineWidth = 3;
     ctx.lineJoin = 'round';
     for (let i = 0; i < 3; i++) {
       const p = (t * 0.9 + i * 0.33) % 1;
-      const y = 6 + p * (MOUTH_H - 18);
+      const y = lane.rim + 8 + p * (PIT_DEPTH - lane.rim - 10);
       ctx.beginPath();
       ctx.moveTo(cx - 10, y);
       ctx.lineTo(cx, y + 9);
@@ -213,7 +232,7 @@ export function drawGapChevrons(ctx: Ctx, lane: Lane, t: number): void {
 /** レール。コインが走る唯一の床 */
 export function drawRail(ctx: Ctx, lane: Lane): void {
   inLane(ctx, lane, () => {
-    const len = lane.solids[0]!.to;
+    const len = lane.rail.to;
 
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.6)';
@@ -258,8 +277,9 @@ export function drawRail(ctx: Ctx, lane: Lane): void {
 
 /** 隙間から 1 段下へ落ちる道筋。奥に伸びる光の柱 */
 export function drawChute(ctx: Ctx, lane: Lane, drop: number): void {
-  const a = laneP(lane, lane.gap.from);
-  const b = laneP(lane, lane.gap.to);
+  const good = lane.bins[1]!;
+  const a = laneP(lane, good.from, -PIT_DEPTH);
+  const b = laneP(lane, good.to, -PIT_DEPTH);
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);

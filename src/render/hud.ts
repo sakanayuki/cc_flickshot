@@ -31,7 +31,7 @@ import {
 } from './shapes.ts';
 
 /** 操作部の天面の y。ガイド文字はここより下に置く */
-const DECK_TOP = 1018;
+const DECK_TOP = 1098;
 
 export type ShotKind = 'weak' | 'good' | 'strong';
 

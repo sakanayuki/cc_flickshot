@@ -7,9 +7,8 @@ import {
   ANIMALS,
   COLORS,
   LOGICAL_W,
-  MAX_REACH,
+  P_MIN,
   ROW_COUNT,
-  SOLID_RUN,
   type DifficultyConfig,
   type Rect,
 } from '../config.ts';
@@ -28,6 +27,13 @@ import {
   type Ctx,
 } from './shapes.ts';
 import { stampIndexFor } from '../save.ts';
+
+/**
+ * 1 段目の成功域 (px/s)。難易度カードの帯を描くためだけの表示用の値で、
+ * 判定には使わない。`npm run verify` の掃引結果と合わせて更新すること。
+ */
+const ROW1_GOOD_FROM = 523;
+const ROW1_GOOD_TO = 1091;
 
 export const LOGO_W = 560;
 export const LOGO_H = 168;
@@ -125,32 +131,48 @@ export function drawDifficultyCard(
     tracking: 5,
   });
 
-  // レーンの縮図。レール → 手前の穴 → 隙間 → 奥の穴
-  const total = SOLID_RUN + MAX_REACH + 120;
+  /*
+   * 力の目盛り。盤面は難易度によらず同じで、変わるのは
+   * **同じ引き量に載る力**だけ。目盛りを P_MIN..上限で描いて、
+   * 「1 段目で当たる引き量」がどこに来るかを帯で示す。
+   */
   const gx = r.x + 34;
   const gy = r.y + dy + r.h - 34;
   const gw = r.w - 68;
-  const k = gw / total;
-  const seg = (from: number, to: number, color: string, glow = false) => {
-    roundRect(ctx, gx + from * k, gy - 6, (to - from) * k, 12, 6);
-    if (glow) {
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 10;
-      paint(ctx, color, null, 0);
-      ctx.restore();
-    } else {
-      paint(ctx, color, null, 0);
-    }
-  };
-  seg(0, SOLID_RUN, alpha(COLORS.rail, 0.9));
-  seg(SOLID_RUN, SOLID_RUN + d.nearHoleSpan, alpha(COLORS.holeRim, 0.75));
-  seg(SOLID_RUN + d.nearHoleSpan, SOLID_RUN + MAX_REACH, COLORS.gap, true);
-  seg(SOLID_RUN + MAX_REACH, total, alpha(COLORS.holeRim, 0.75));
+  const span = d.powerMax - P_MIN;
+  const at = (power: number) => gx + ((power - P_MIN) / span) * gw;
 
-  text(ctx, 'ねらう幅', gx + (SOLID_RUN + (d.nearHoleSpan + MAX_REACH) / 2) * k, gy - 20, {
+  roundRect(ctx, gx, gy - 6, gw, 12, 6);
+  paint(ctx, alpha(COLORS.shellLo, 0.9), null, 0);
+
+  // 1 段目の成功域(検算 §2 が固定する実測値)
+  const lo = at(ROW1_GOOD_FROM);
+  const hi = at(ROW1_GOOD_TO);
+  roundRect(ctx, lo, gy - 6, Math.max(4, hi - lo), 12, 6);
+  ctx.save();
+  ctx.shadowColor = COLORS.gap;
+  ctx.shadowBlur = 10;
+  paint(ctx, COLORS.gap, null, 0);
+  ctx.restore();
+
+  roundRect(ctx, gx, gy - 6, gw, 12, 6);
+  paint(ctx, null, alpha(COLORS.rail, 0.5), 1.5);
+
+  text(ctx, 'よわく', gx, gy - 20, {
     size: 11,
-    color: alpha(COLORS.gap, 0.8),
+    color: alpha(COLORS.textDim, 0.9),
+    weight: '700',
+    align: 'left',
+  });
+  text(ctx, 'つよく', gx + gw, gy - 20, {
+    size: 11,
+    color: alpha(COLORS.textDim, 0.9),
+    weight: '700',
+    align: 'right',
+  });
+  text(ctx, '1 だんめが 当たる引き', (lo + hi) / 2, gy + 26, {
+    size: 11,
+    color: alpha(COLORS.gap, 0.85),
     weight: '700',
   });
 }

@@ -1,29 +1,26 @@
 /**
- * コインの状態機械。動きそのものは Matter.js が決めるので、ここは
- * 「いまどのレーンにいるか」「穴に入ったか、隙間から落ちたか」を
- * 見張って結果を出すだけ。
+ * コインの状態機械。
  *
- * 位置と速度は Matter から読み、レーンに沿った座標 (u, perp) に射影して判定する。
+ * **落ちる / 落ちないを決めるルールはここに一切無い。**
+ * レールもフィンもポケットの底も Matter.js の実体なので、コインは実際に
+ * どれかのポケットへ落ちて止まる。ここがやるのは、
+ * 「いまコインがどのポケットの中にいるか」を位置から読むことだけ。
+ *
+ * 位置はレーンに沿った座標 (u, perp) に射影して見る。
  *   u    = そのレーンの低い端からの距離
- *   perp = レール上面からの高さ。載っているとき COIN_R、落ちると負になる
+ *   perp = レール面からの高さ。載っているとき COIN_R、受け皿の中では負
  */
 
+import { COIN_R, FALL_ANIM, P_MIN, REST_SPEED, ROW_COUNT, WIN_ANIM, type Vec2 } from '../config.ts';
 import {
-  COIN_R,
-  FALL_ANIM,
-  P_MAX,
-  P_MIN,
-  REST_SPEED,
-  ROW_COUNT,
-  WIN_ANIM,
-  type Vec2,
-} from '../config.ts';
-import {
+  binAt,
   ENTRY_U,
-  inSpan,
+  IN_BIN_PERP,
   laneP,
   laneProject,
   restPoint,
+  THROUGH_PERP,
+  type Bin,
   type Lane,
   type WinPocket,
 } from './board.ts';
@@ -39,21 +36,16 @@ import {
   type PhysWorld,
 } from './world.ts';
 
-export type CoinPhase = 'rolling' | 'ready' | 'falling' | 'lost' | 'win';
+export type CoinPhase = 'rolling' | 'ready' | 'inBin' | 'falling' | 'lost' | 'win';
 export type LostKind = 'weak' | 'strong';
 
-/** レール上面からこれだけ下に中心が来たら「穴の中」。コイン全体が面の下 */
-const PIT_DEPTH = -30;
 /** 着地とみなす接触距離 */
 const LAND_PERP = COIN_R + 3;
-/** 構えに入る条件。ストッパーに寄っていて、ほぼ止まっている */
+/** 構えに入る条件。壁ぎわに寄っていて、ほぼ止まっている */
 const READY_U = COIN_R + 10;
 
-/** 動かなくなったコインを助ける。詰み(結果が出ない)を作らないため */
-const STUCK_SPEED = 22;
-const STUCK_NUDGE_AT = 1.2; // s
-const STUCK_GIVEUP_AT = 4.0; // s
-const NUDGE_SPEED = 70;
+/** 受け皿に入ったコインが落ち着くのを待つ上限 (s) */
+const SETTLE_LIMIT = 2.5;
 /** 構えを作るときに落ち着かせるフレーム数 */
 const SETTLE_STEPS = 20;
 
@@ -66,9 +58,9 @@ export interface CoinState {
   laneIndex: number;
   /** falling 中の着地先 */
   targetIndex: number;
+  /** 入った受け皿。まだ入っていなければ null */
+  bin: Bin | null;
   lostKind: LostKind | null;
-  /** 落ちた穴の中心(沈む演出用) */
-  lostAt: Vec2 | null;
   /** 一度でも弾かれたか */
   flicked: boolean;
 
@@ -80,14 +72,19 @@ export interface CoinState {
   perp: number;
   speed: number;
 
-  stuck: number;
+  /** 受け皿の中で落ち着くのを待っている時間 */
+  settle: number;
   /** lost / win の演出タイマ(秒、カウントダウン) */
   timer: number;
 }
 
 export interface StepResult {
   becameReady: boolean;
+  /** この step でどれかの受け皿に入った */
+  enteredBin: BinKindOrNull;
+  /** この step でまん中の受け皿の出口を抜けた */
   droppedThrough: boolean;
+  /** この step で 1 段下に着地した */
   landed: boolean;
   lost: LostKind | null;
   won: boolean;
@@ -95,9 +92,12 @@ export interface StepResult {
   finished: boolean;
 }
 
+type BinKindOrNull = 'weak' | 'good' | 'strong' | null;
+
 function emptyResult(): StepResult {
   return {
     becameReady: false,
+    enteredBin: null,
     droppedThrough: false,
     landed: false,
     lost: null,
@@ -115,8 +115,8 @@ export function createCoin(lanes: Lane[], pocket: WinPocket): CoinState {
     phase: 'rolling',
     laneIndex: 0,
     targetIndex: 0,
+    bin: null,
     lostKind: null,
-    lostAt: null,
     flicked: false,
     pos: { x: 0, y: 0 },
     vel: { x: 0, y: 0 },
@@ -124,30 +124,30 @@ export function createCoin(lanes: Lane[], pocket: WinPocket): CoinState {
     u: 0,
     perp: 0,
     speed: 0,
-    stuck: 0,
+    settle: 0,
     timer: 0,
   };
   resetToEntry(coin);
   return coin;
 }
 
-/** 1 段目に投入された状態にする。斜面を滑ってストッパーへ向かう */
+/** 1 段目に投入された状態にする。レールを滑って壁ぎわへ向かう */
 export function resetToEntry(coin: CoinState): void {
   const lane = coin.lanes[0]!;
   coin.phase = 'rolling';
   coin.laneIndex = 0;
   coin.targetIndex = 0;
+  coin.bin = null;
   coin.lostKind = null;
-  coin.lostAt = null;
   coin.flicked = false;
-  coin.stuck = 0;
+  coin.settle = 0;
   coin.timer = 0;
   placeCoin(coin.world, laneP(lane, ENTRY_U, COIN_R));
   sync(coin);
 }
 
 /**
- * ストッパーで構えた状態を作る(テストと検算用)。
+ * 壁ぎわで構えた状態を作る(テストと検算用)。
  *
  * 理想の座標に置くだけでは接地が厳密でないので、実際に少しだけ
  * 物理を回して落ち着かせる。ゲーム中に自然に構えたときとまったく
@@ -157,7 +157,8 @@ export function placeReady(coin: CoinState, laneIndex: number): void {
   const lane = coin.lanes[laneIndex]!;
   coin.laneIndex = laneIndex;
   coin.targetIndex = laneIndex;
-  coin.stuck = 0;
+  coin.bin = null;
+  coin.settle = 0;
   coin.phase = 'rolling';
   placeCoin(coin.world, restPoint(lane));
   for (let i = 0; i < SETTLE_STEPS; i++) stepWorld(coin.world, 1 / 60);
@@ -175,7 +176,9 @@ function sync(coin: CoinState): void {
   // 転がって見えるように、進んだ距離ぶんだけ回す(物理には影響しない)
   const dx = coin.pos.x - prev.x;
   const dy = coin.pos.y - prev.y;
-  if (Math.abs(dx) + Math.abs(dy) < 200) coin.spin += Math.hypot(dx, dy) * Math.sign(dx || 1) / COIN_R;
+  if (Math.abs(dx) + Math.abs(dy) < 200) {
+    coin.spin += (Math.hypot(dx, dy) * Math.sign(dx || 1)) / COIN_R;
+  }
   const pr = laneProject(lane, coin.pos);
   coin.u = pr.u;
   coin.perp = pr.perp;
@@ -185,11 +188,12 @@ export function canFlick(coin: CoinState): boolean {
   return coin.phase === 'ready';
 }
 
-export function pullToPower(pull: number): number {
-  return P_MIN + (P_MAX - P_MIN) * pull;
+/** 引き量 0..1 → 斜面に沿った初速。上限は難易度ごと */
+export function pullToPower(pull: number, powerMax: number): number {
+  return P_MIN + (powerMax - P_MIN) * pull;
 }
 
-/** 斜面に沿った初速を与える。転がりに合った回転も一緒に入れる */
+/** 斜面に沿った初速を与える */
 export function flickCoin(coin: CoinState, power: number): boolean {
   if (!canFlick(coin)) return false;
   const lane = coin.lanes[coin.laneIndex]!;
@@ -197,7 +201,7 @@ export function flickCoin(coin: CoinState, power: number): boolean {
   placeCoin(coin.world, coin.pos, { x: lane.dir.x * power, y: lane.dir.y * power });
   coin.phase = 'rolling';
   coin.flicked = true;
-  coin.stuck = 0;
+  coin.settle = 0;
   sync(coin);
   return true;
 }
@@ -208,28 +212,14 @@ export function depthOf(coin: CoinState): number {
   return Math.min(ROW_COUNT, coin.laneIndex + 1);
 }
 
-function toLost(coin: CoinState, kind: LostKind, at: Vec2): void {
-  coin.phase = 'lost';
-  coin.lostKind = kind;
-  coin.lostAt = at;
-  coin.timer = FALL_ANIM;
-}
-
-/** 落ちた穴の中心。沈む演出の着地点にする */
-function holeCenter(lane: Lane, from: number, to: number): Vec2 {
-  return laneP(lane, (from + to) / 2, -COIN_R * 0.4);
-}
-
 export function stepCoin(coin: CoinState, dt: number): StepResult {
   const res = emptyResult();
 
   if (coin.phase === 'lost' || coin.phase === 'win') {
     coin.timer -= dt;
-    // あたりのコインはカップに落ちきるまで物理を回し続ける
-    if (coin.phase === 'win') {
-      stepWorld(coin.world, dt);
-      sync(coin);
-    }
+    // 演出のあいだもコインは受け皿の中で動いているので、物理は回し続ける
+    stepWorld(coin.world, dt);
+    sync(coin);
     if (coin.timer <= 0) res.finished = true;
     return res;
   }
@@ -237,76 +227,44 @@ export function stepCoin(coin: CoinState, dt: number): StepResult {
   if (coin.phase === 'ready') return res;
 
   let settled = false;
-  let prevU = coin.u;
-  let prevPerp = coin.perp;
   stepWorld(coin.world, dt, () => {
-    const pu = prevU;
-    const pp = prevPerp;
     sync(coin);
-    prevU = coin.u;
-    prevPerp = coin.perp;
-    settled =
-      coin.phase === 'falling' ? checkFalling(coin, res) : checkRolling(coin, res, pu, pp);
+    settled = advance(coin, res);
     return settled;
   });
   sync(coin);
 
-  if (!settled) updateStuck(coin, dt, res);
+  if (coin.phase === 'inBin') updateInBin(coin, dt, res);
   return res;
 }
 
-/**
- * レーンの上にいるとき。穴・隙間・構えを見る。
- *
- * 結果は「レール面から PIT_DEPTH まで沈んだ瞬間の u」だけで決まる。
- * サブステップは 1/300 秒あり、900px/s では 1 歩で 3px 進むので、
- * そのまま見ると境目が 3px ぶんガタつき、弾く力に対して結果が
- * 単調でなくなる。前の歩との間で**線形補間して交差の瞬間を出す**。
- */
-function checkRolling(coin: CoinState, res: StepResult, prevU: number, prevPerp: number): boolean {
-  const lane = coin.lanes[coin.laneIndex]!;
-
-  // レール面より下へ抜けた瞬間
-  const tPit =
-    prevPerp >= PIT_DEPTH && coin.perp < PIT_DEPTH
-      ? (prevPerp - PIT_DEPTH) / (prevPerp - coin.perp)
-      : Infinity;
-  /*
-   * 隙間の終わりから先には床が無いので、そこへ中心が届いた時点で
-   * もう隙間に受け止められない = 強すぎが確定している。
-   * 落ちきるのを待つと高い端の壁で跳ね返って戻り、隙間や手前の穴に
-   * 落ちて「強すぎたのに助かる」が起きる。plan §4.2 が禁じる挙動なので、
-   * 幾何で断ち切る。
-   */
-  const tOver =
-    prevU <= lane.gap.to && coin.u > lane.gap.to
-      ? (lane.gap.to - prevU) / (coin.u - prevU)
-      : Infinity;
-
-  if (tPit <= tOver && tPit !== Infinity) {
-    const u = prevU + (coin.u - prevU) * tPit;
-    if (inSpan(lane.nearHole, u)) {
-      toLost(coin, 'weak', holeCenter(lane, lane.nearHole.from, lane.nearHole.to));
-      res.lost = 'weak';
+/** サブステップごとの見張り。状態ごとに見るものが違う */
+function advance(coin: CoinState, res: StepResult): boolean {
+  switch (coin.phase) {
+    case 'rolling':
+      return checkRolling(coin, res);
+    case 'falling':
+      return checkFalling(coin, res);
+    case 'inBin':
+      return checkInBin(coin, res);
+    default:
       return true;
-    }
-    if (u <= lane.gap.to) {
-      res.droppedThrough = true;
-      if (coin.laneIndex >= ROW_COUNT - 1) {
-        coin.phase = 'win';
-        coin.timer = WIN_ANIM;
-        res.won = true;
-      } else {
-        coin.phase = 'falling';
-        coin.targetIndex = coin.laneIndex + 1;
-      }
-      return true;
-    }
   }
+}
 
-  if (tPit !== Infinity || tOver !== Infinity) {
-    toLost(coin, 'strong', holeCenter(lane, lane.farHole.from, lane.farHole.to));
-    res.lost = 'strong';
+/**
+ * レールの上、または飛んでいるとき。
+ * どのフィンの頂点よりも深く沈んだら、もうどれかのポケットの中にいる。
+ *
+ * **ここではまだどのポケットかを決めない。** 面を横切った瞬間の u で決めると、
+ * そのあとフィンに当たって隣へ落ちたコインを取り違える。
+ * 決めるのは「実際に止まった場所」か「実際に穴を抜けたか」だけ。
+ */
+function checkRolling(coin: CoinState, res: StepResult): boolean {
+  if (coin.perp < IN_BIN_PERP) {
+    coin.phase = 'inBin';
+    coin.bin = null;
+    coin.settle = 0;
     return true;
   }
 
@@ -317,7 +275,6 @@ function checkRolling(coin: CoinState, res: StepResult, prevU: number, prevPerp:
     coin.perp < COIN_R * 2
   ) {
     coin.phase = 'ready';
-    coin.stuck = 0;
     freezeCoin(coin.world);
     res.becameReady = true;
     return true;
@@ -326,14 +283,36 @@ function checkRolling(coin: CoinState, res: StepResult, prevU: number, prevPerp:
   return false;
 }
 
-/** 隙間から落ちているとき。1 段下のレーンに触れたら乗り換える */
+/**
+ * ポケットの中。**底が無いのはまん中だけ**なので、ここまで沈んだ時点で
+ * 「進める」が物理的に確定している。
+ * 手前と奥のポケットには底があり、コインはその上で止まる。
+ */
+function checkInBin(coin: CoinState, res: StepResult): boolean {
+  if (coin.perp > THROUGH_PERP) return false;
+
+  coin.bin = binAt(coin.lanes[coin.laneIndex]!, coin.u);
+  res.enteredBin = 'good';
+  res.droppedThrough = true;
+  if (coin.laneIndex >= ROW_COUNT - 1) {
+    coin.phase = 'win';
+    coin.timer = WIN_ANIM;
+    res.won = true;
+  } else {
+    coin.phase = 'falling';
+    coin.targetIndex = coin.laneIndex + 1;
+  }
+  return true;
+}
+
+/** 出口を抜けて落ちているとき。1 段下のレーンに触れたら乗り換える */
 function checkFalling(coin: CoinState, res: StepResult): boolean {
   const target = coin.lanes[coin.targetIndex]!;
   const pr = laneProject(target, coin.pos);
-  if (pr.perp <= LAND_PERP && pr.perp > PIT_DEPTH) {
+  if (pr.perp <= LAND_PERP && pr.perp > IN_BIN_PERP) {
     coin.laneIndex = coin.targetIndex;
     coin.phase = 'rolling';
-    coin.stuck = 0;
+    coin.bin = null;
     res.landed = true;
     sync(coin);
     return true;
@@ -342,29 +321,27 @@ function checkFalling(coin: CoinState, res: StepResult): boolean {
 }
 
 /**
- * 動かなくなったコインを助ける。
- * レールの角に乗ったまま静止すると、弾くこともできず結果も出ない
- * (=進行不能)。まず低い端へ軽く押し、それでも駄目なら決着させる。
+ * 底のあるポケットに落ちたコインが**止まるのを待ってから**結果を読む。
+ *
+ * 転がっている最中に読むと、そのあとフィンに弾かれて隣へ移るコインを
+ * 取り違える。止まってしまえば、フィンが実体としてコインを分けているので
+ * u を見るだけでどのポケットかが一意に決まる。
  */
-function updateStuck(coin: CoinState, dt: number, res: StepResult): void {
-  if (coin.phase !== 'rolling' || coin.speed >= STUCK_SPEED) {
-    coin.stuck = 0;
-    return;
-  }
-  coin.stuck += dt;
-  const lane = coin.lanes[coin.laneIndex]!;
+function updateInBin(coin: CoinState, dt: number, res: StepResult): void {
+  coin.settle += dt;
+  const stopped = coin.speed < REST_SPEED && coin.settle > 0.12;
+  if (!stopped && coin.settle < SETTLE_LIMIT) return;
 
-  if (coin.stuck > STUCK_GIVEUP_AT) {
-    const kind: LostKind = coin.u > lane.gap.from ? 'strong' : 'weak';
-    toLost(coin, kind, { ...coin.pos });
-    res.lost = kind;
+  const bin = binAt(coin.lanes[coin.laneIndex]!, coin.u);
+  coin.bin = bin;
+  res.enteredBin = bin.kind;
+  if (bin.kind === 'good') {
+    // 底が無いので止まることは無いはずだが、詰ませないための保険
+    coin.settle = 0;
     return;
   }
-  if (coin.stuck > STUCK_NUDGE_AT) {
-    placeCoin(coin.world, coin.pos, {
-      x: -lane.dir.x * NUDGE_SPEED,
-      y: -lane.dir.y * NUDGE_SPEED,
-    });
-    coin.stuck = STUCK_NUDGE_AT * 0.5;
-  }
+  coin.phase = 'lost';
+  coin.lostKind = bin.kind;
+  coin.timer = FALL_ANIM;
+  res.lost = bin.kind;
 }
