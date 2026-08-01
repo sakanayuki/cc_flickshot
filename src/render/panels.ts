@@ -29,10 +29,13 @@ import {
 } from './shapes.ts';
 import { stampIndexFor } from '../save.ts';
 
-/** タイトルロゴ。真鍮の板に彫った見た目 + 走る光沢 */
-export function drawLogo(ctx: Ctx, cx: number, cy: number, t: number): void {
-  const w = 560;
-  const h = 168;
+export const LOGO_W = 560;
+export const LOGO_H = 168;
+
+/** タイトルロゴの板と文字。動かないのでキャッシュ側で 1 度だけ描く */
+export function drawLogo(ctx: Ctx, cx: number, cy: number): void {
+  const w = LOGO_W;
+  const h = LOGO_H;
   roundRect(ctx, cx - w / 2, cy - h / 2, w, h, 20);
   ctx.fillStyle = vGrad(ctx, cy - h / 2, cy + h / 2, [
     [0, alpha(COLORS.shellHi, 0.9)],
@@ -57,15 +60,17 @@ export function drawLogo(ctx: Ctx, cx: number, cy: number, t: number): void {
     weight: '700',
     tracking: 8,
   });
+}
 
-  // 走る光沢
+/** ロゴの上を走る光沢。ここだけ毎フレーム描く */
+export function drawLogoShine(ctx: Ctx, cx: number, cy: number, t: number): void {
   withClip(
     ctx,
-    () => roundRect(ctx, cx - w / 2, cy - h / 2, w, h, 20),
+    () => roundRect(ctx, cx - LOGO_W / 2, cy - LOGO_H / 2, LOGO_W, LOGO_H, 20),
     () => {
       const p = ((t * 0.22) % 1.6) - 0.3;
       ctx.save();
-      ctx.translate(cx - w / 2 + p * w, cy);
+      ctx.translate(cx - LOGO_W / 2 + p * LOGO_W, cy);
       ctx.rotate(-0.35);
       ctx.fillStyle = lGrad(ctx, { x: -60, y: 0 }, { x: 60, y: 0 }, [
         [0, alpha('#FFFFFF', 0)],

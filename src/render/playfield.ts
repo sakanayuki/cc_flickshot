@@ -63,8 +63,8 @@ function inLane(ctx: Ctx, lane: Lane, body: () => void): void {
 
 // ---------------------------------------------------------------- 背景
 
-/** ガラスの中の化粧板 */
-export function drawField(ctx: Ctx, t: number): void {
+/** ガラスの中の化粧板。動かないのでキャッシュ側で 1 度だけ描く */
+export function drawField(ctx: Ctx): void {
   clipField(ctx, () => {
     ctx.fillStyle = vGrad(ctx, BOARD_TOP, BOARD_BOTTOM, [
       [0, COLORS.fieldDeep],
@@ -90,7 +90,6 @@ export function drawField(ctx: Ctx, t: number): void {
     }
 
     // 奥のほうのぼんやりした光
-    const glow = 0.5 + 0.5 * Math.sin(t * 0.6);
     ctx.fillStyle = rGrad(
       ctx,
       BOARD_LEFT + BOARD_W / 2,
@@ -98,7 +97,7 @@ export function drawField(ctx: Ctx, t: number): void {
       10,
       BOARD_W * 0.9,
       [
-        [0, alpha(COLORS.fieldGlow, 0.3 + glow * 0.06)],
+        [0, alpha(COLORS.fieldGlow, 0.33)],
         [1, alpha(COLORS.fieldGlow, 0)],
       ],
     );
@@ -127,8 +126,11 @@ function zonesOf(lane: Lane): Zone[] {
 /**
  * 落とし口。レールが切れたところから高い端まで、床が無いことを見せる。
  * 3 つの区間を色と縁取りで描き分ける(アウト / 進める / アウト)。
+ *
+ * ここは動かないのでキャッシュ側で 1 度だけ描く。
+ * 流れる矢羽根だけ `drawGapChevrons` で毎フレーム重ねる。
  */
-export function drawPits(ctx: Ctx, lane: Lane, t: number): void {
+export function drawPits(ctx: Ctx, lane: Lane): void {
   inLane(ctx, lane, () => {
     for (const z of zonesOf(lane)) {
       const w = z.to - z.from;
@@ -164,22 +166,7 @@ export function drawPits(ctx: Ctx, lane: Lane, t: number): void {
       ctx.stroke();
       ctx.restore();
 
-      if (z.good) {
-        // 下向きの矢羽根。ここから下の段へ進めることを示す
-        const cx = (z.from + z.to) / 2;
-        for (let i = 0; i < 3; i++) {
-          const p = (t * 0.9 + i * 0.33) % 1;
-          const y = 6 + p * (MOUTH_H - 18);
-          ctx.beginPath();
-          ctx.moveTo(cx - 10, y);
-          ctx.lineTo(cx, y + 9);
-          ctx.lineTo(cx + 10, y);
-          ctx.strokeStyle = alpha(COLORS.gap, 0.8 * (1 - p));
-          ctx.lineWidth = 3;
-          ctx.lineJoin = 'round';
-          ctx.stroke();
-        }
-      } else {
+      if (!z.good) {
         // アウトの口は斜線で塞ぐ。色に頼らず形でも見分けられるようにする
         ctx.save();
         roundRect(ctx, z.from, -2, w, MOUTH_H, 8);
@@ -200,6 +187,25 @@ export function drawPits(ctx: Ctx, lane: Lane, t: number): void {
     for (const u of [lane.nearHole.to, lane.gap.to]) {
       roundRect(ctx, u - 3, 0, 6, MOUTH_H - 6, 3);
       paint(ctx, alpha(COLORS.railLo, 0.7), alpha('#000000', 0.7), 1);
+    }
+  });
+}
+
+/** 進める隙間を流れる下向きの矢羽根。ここだけ毎フレーム描く */
+export function drawGapChevrons(ctx: Ctx, lane: Lane, t: number): void {
+  inLane(ctx, lane, () => {
+    const cx = (lane.gap.from + lane.gap.to) / 2;
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    for (let i = 0; i < 3; i++) {
+      const p = (t * 0.9 + i * 0.33) % 1;
+      const y = 6 + p * (MOUTH_H - 18);
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, y);
+      ctx.lineTo(cx, y + 9);
+      ctx.lineTo(cx + 10, y);
+      ctx.strokeStyle = alpha(COLORS.gap, 0.8 * (1 - p));
+      ctx.stroke();
     }
   });
 }
@@ -251,10 +257,9 @@ export function drawRail(ctx: Ctx, lane: Lane): void {
 }
 
 /** 隙間から 1 段下へ落ちる道筋。奥に伸びる光の柱 */
-export function drawChute(ctx: Ctx, lane: Lane, drop: number, t: number): void {
+export function drawChute(ctx: Ctx, lane: Lane, drop: number): void {
   const a = laneP(lane, lane.gap.from);
   const b = laneP(lane, lane.gap.to);
-  const pulse = 0.5 + 0.5 * Math.sin(t * 2.2 + lane.index);
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
@@ -263,7 +268,7 @@ export function drawChute(ctx: Ctx, lane: Lane, drop: number, t: number): void {
   ctx.lineTo(a.x, a.y + drop);
   ctx.closePath();
   ctx.fillStyle = lGrad(ctx, a, { x: a.x, y: a.y + drop }, [
-    [0, alpha(COLORS.gap, 0.16 + pulse * 0.05)],
+    [0, alpha(COLORS.gap, 0.18)],
     [1, alpha(COLORS.gap, 0)],
   ]);
   ctx.fill();
@@ -349,13 +354,12 @@ export function drawLeverKnob(ctx: Ctx, lane: Lane, swing: number): void {
 
 // ---------------------------------------------------------------- あたりの口
 
-export function drawWinPocket(ctx: Ctx, p: WinPocket, t: number): void {
+export function drawWinPocket(ctx: Ctx, p: WinPocket): void {
   const x = p.center.x - p.w / 2;
   const y = p.center.y - p.h / 2;
-  const pulse = 0.5 + 0.5 * Math.sin(t * 1.8);
 
   ctx.save();
-  ctx.shadowColor = alpha(COLORS.pocket, 0.5 + pulse * 0.3);
+  ctx.shadowColor = alpha(COLORS.pocket, 0.65);
   ctx.shadowBlur = 26;
   roundRect(ctx, x, y, p.w, p.h, 12);
   ctx.fillStyle = vGrad(ctx, y, y + p.h, [
@@ -413,11 +417,13 @@ export function drawCoin(ctx: Ctx, look: CoinLook): void {
   ctx.globalAlpha = 1 - look.sink * 0.4;
   ctx.translate(pos.x, pos.y);
 
+  // 影。shadowBlur はラスタライズが重いので、半透明の楕円で代用する
+  ctx.beginPath();
+  ctx.ellipse(1, r * 0.34, r * 0.92, r * 0.86, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fill();
+
   // 本体
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 12;
-  ctx.shadowOffsetY = 4;
   circle(ctx, 0, 0, r);
   ctx.fillStyle = rGrad(ctx, -r * 0.32, -r * 0.36, r * 0.1, r * 1.5, [
     [0, COLORS.coinHi],
@@ -425,7 +431,6 @@ export function drawCoin(ctx: Ctx, look: CoinLook): void {
     [1, COLORS.coinLo],
   ]);
   ctx.fill();
-  ctx.restore();
   paint(ctx, null, COLORS.coinEdge, 2.5);
 
   // 縁の刻み。回転が見えるようにする

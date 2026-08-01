@@ -63,7 +63,11 @@ export interface DifficultyConfig {
 
 export const LOGICAL_W = 720;
 export const LOGICAL_H = 1280;
-export const MAX_DPR = 3;
+/**
+ * DPR の上限。3 にすると 1290×2796 = 360 万画素を毎フレーム塗ることになり、
+ * 見た目がほとんど変わらないわりにラスタライズが 2.25 倍重くなる。
+ */
+export const MAX_DPR = 2;
 
 // ---------------------------------------------------------------- コイン
 

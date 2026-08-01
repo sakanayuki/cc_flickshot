@@ -6,6 +6,7 @@
 import {
   BUTTON_PADDING,
   COLORS,
+  LOGICAL_H,
   LOGICAL_W,
   RESULT_INPUT_DELAY,
   ROW_COUNT,
@@ -15,6 +16,7 @@ import {
   type Vec2,
 } from '../config.ts';
 import { drawRoom, drawShell } from '../render/cabinet.ts';
+import { Layer } from '../render/layer.ts';
 import { drawButton } from '../render/hud.ts';
 import { ParticleSystem } from '../render/particles.ts';
 import { drawDepthLadder, drawMarquee, drawStampPress } from '../render/panels.ts';
@@ -40,6 +42,8 @@ export class ResultScene implements Scene {
   private time = 0;
   private particles = new ParticleSystem();
   private pressed: 'again' | 'home' | null = null;
+  /** 動かない絵。結果ごとに看板が変わるので enter で捨てる */
+  private bg = new Layer();
 
   constructor(private app: SceneContext) {}
 
@@ -48,6 +52,7 @@ export class ResultScene implements Scene {
     this.time = 0;
     this.pressed = null;
     this.particles.clear();
+    this.bg.invalidate();
     if (this.params?.outcome === 'win') {
       this.particles.emitConfetti({ x: LOGICAL_W / 2, y: -30 }, 90, LOGICAL_W);
     }
@@ -56,6 +61,8 @@ export class ResultScene implements Scene {
   exit(): void {
     this.particles.clear();
     this.pressed = null;
+    // 焼いた絵は数十 MB になる。使わないシーンで抱えたままにしない
+    this.bg.invalidate();
   }
 
   update(dt: number): void {
@@ -93,9 +100,11 @@ export class ResultScene implements Scene {
 
   render(ctx: Ctx): void {
     const p = this.params;
-    drawRoom(ctx);
-    drawShell(ctx);
-    drawMarquee(ctx, 62, p?.difficulty.tag ?? 'RESULT');
+    this.bg.draw(ctx, LOGICAL_W, LOGICAL_H, (c) => {
+      drawRoom(c);
+      drawShell(c);
+      drawMarquee(c, 62, p?.difficulty.tag ?? 'RESULT');
+    });
 
     const outcome = p?.outcome ?? 'giveup';
     const accent =

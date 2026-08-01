@@ -10,6 +10,8 @@
 import {
   ANIMALS,
   BOARD_BOTTOM,
+  BOARD_LEFT,
+  BOARD_RIGHT,
   BOARD_TOP,
   COIN_R,
   COIN_SLOT_CENTER,
@@ -21,6 +23,7 @@ import {
   GUIDE_IDLE_DELAY,
   INSERT_ANIM,
   LOGICAL_W,
+  LOGICAL_H,
   ROW_COUNT,
   ROW_GAP,
   type AnimalKind,
@@ -66,18 +69,21 @@ import {
 import {
   drawGiveUp,
   drawLastShot,
+  drawMeterFrame,
   drawPlunger,
   drawPowerMeter,
   drawPullGuide,
   type ShotKind,
   type ShotMark,
 } from '../render/hud.ts';
+import { Layer } from '../render/layer.ts';
 import { ParticleSystem } from '../render/particles.ts';
 import {
   drawChute,
   drawCoin,
   drawEntryChute,
   drawField,
+  drawGapChevrons,
   drawLever,
   drawLeverKnob,
   drawPitLip,
@@ -85,7 +91,16 @@ import {
   drawRail,
   drawWinPocket,
 } from '../render/playfield.ts';
-import { alpha, clamp01, dist, easeInOut, text, type Ctx } from '../render/shapes.ts';
+import {
+  alpha,
+  clamp01,
+  dist,
+  easeInOut,
+  roundRect,
+  text,
+  withClip,
+  type Ctx,
+} from '../render/shapes.ts';
 import { stampIndexFor } from '../save.ts';
 import type { GameParams, Outcome, PointerPhase, Scene, SceneContext } from './scene.ts';
 
@@ -106,6 +121,8 @@ export class GameScene implements Scene {
   private levers: LeverState[] = createLevers();
   private plunger: PlungerState = createPlunger();
   private particles = new ParticleSystem();
+  /** 動かない絵は 1 枚にまとめて焼く。難易度で盤面が変わるので enter で捨てる */
+  private bg = new Layer();
 
   private time = 0;
   private phase: Phase = 'insert';
@@ -134,6 +151,7 @@ export class GameScene implements Scene {
     this.levers = createLevers();
     this.plunger = createPlunger();
     this.particles.clear();
+    this.bg.invalidate();
     this.time = 0;
     this.phase = 'insert';
     this.insertT = 0;
@@ -149,6 +167,8 @@ export class GameScene implements Scene {
 
   exit(): void {
     releasePlunger(this.plunger);
+    // 焼いた絵は数十 MB になる。使わないシーンで抱えたままにしない
+    this.bg.invalidate();
   }
 
   // ---------------------------------------------------------------- 更新
@@ -281,50 +301,76 @@ export class GameScene implements Scene {
 
   render(ctx: Ctx): void {
     const coin = this.coin;
-    drawRoom(ctx);
-    drawShell(ctx);
-    drawField(ctx, this.time);
 
-    // 奥から手前へ: 落下の光 → あたりの口 → 投入シュート → 落とし口 → レール
-    for (const lane of this.lanes) {
-      const drop = lane.index < ROW_COUNT - 1 ? ROW_GAP : BOARD_BOTTOM - lane.low.y;
-      drawChute(ctx, lane, drop, this.time);
-    }
-    drawWinPocket(ctx, this.pocket, this.time);
-    drawEntryChute(ctx, this.lanes[0]!, ENTRY_U, COIN_SLOT_CENTER);
+    // 動かないものは 1 枚に焼いてある。毎フレームは貼るだけ
+    this.bg.draw(ctx, LOGICAL_W, LOGICAL_H, (c) => this.paintStatic(c));
 
-    for (const lane of this.lanes) {
-      drawPits(ctx, lane, this.time);
-      drawRail(ctx, lane);
-      const lv = this.levers[lane.index]!;
-      drawLever(ctx, lane, lv.swing, lv.flash);
-    }
+    /*
+     * 動くものはまとめてガラス窓の中に閉じる。
+     * ベゼルは焼いた 1 枚に入っているので、クリップしないと
+     * レバーのケースや紙吹雪がその上にはみ出す。
+     */
+    withClip(
+      ctx,
+      () =>
+        roundRect(
+          ctx,
+          BOARD_LEFT,
+          BOARD_TOP,
+          BOARD_RIGHT - BOARD_LEFT,
+          BOARD_BOTTOM - BOARD_TOP,
+          12,
+        ),
+      () => {
+        for (const lane of this.lanes) drawGapChevrons(ctx, lane, this.time);
+        for (const lane of this.lanes) {
+          const lv = this.levers[lane.index]!;
+          drawLever(ctx, lane, lv.swing, lv.flash);
+        }
+        if (coin) this.renderCoin(ctx, coin);
+        this.particles.render(ctx);
+      },
+    );
 
-    if (coin) this.renderCoin(ctx, coin);
-    this.particles.render(ctx);
-
-    drawGlass(ctx, this.time);
-    drawBezel(ctx);
     drawDepthMarks(ctx, coin ? depthOf(coin) : 0);
     for (const lane of this.lanes) drawLeverKnob(ctx, lane, this.levers[lane.index]!.swing);
-    drawCoinSlot(ctx, COIN_SLOT_CENTER, COIN_SLOT_SIZE.w, COIN_SLOT_SIZE.h);
     drawGiveUp(ctx, clamp01(this.giveUpHold / GIVEUP_HOLD));
     this.renderHeader(ctx);
 
-    // 操作部。台を敷いてから、その上に載るものを描く
-    drawControlDeck(ctx);
-    this.renderDeck(ctx);
     drawPowerMeter(
       ctx,
       this.plunger.grabbed ? this.plunger.pull : this.plunger.visualPull,
       this.marks,
     );
     drawPlunger(ctx, this.plunger.knobY, this.plunger.cooldown);
-    drawLastShot(ctx, this.lastShot, { x: DECK_COL, y: BOARD_BOTTOM + 168 });
+    this.renderDeck(ctx);
 
     if (this.phase === 'play' && this.plunger.idleTime > GUIDE_IDLE_DELAY && !this.plunger.grabbed) {
       drawPullGuide(ctx, this.plunger.knobY, this.time);
     }
+  }
+
+  /** 焼いておく背景。筐体・化粧板・落とし口・レール・操作部の台 */
+  private paintStatic(c: Ctx): void {
+    drawRoom(c);
+    drawShell(c);
+    drawField(c);
+    for (const lane of this.lanes) {
+      const drop = lane.index < ROW_COUNT - 1 ? ROW_GAP : BOARD_BOTTOM - lane.low.y;
+      drawChute(c, lane, drop);
+    }
+    drawWinPocket(c, this.pocket);
+    drawEntryChute(c, this.lanes[0]!, ENTRY_U, COIN_SLOT_CENTER);
+    for (const lane of this.lanes) {
+      drawPits(c, lane);
+      drawRail(c, lane);
+    }
+    // ガラスとベゼルも同じ 1 枚に含める。全画面の合成は 1 回で済ませたい
+    drawGlass(c);
+    drawBezel(c);
+    drawCoinSlot(c, COIN_SLOT_CENTER, COIN_SLOT_SIZE.w, COIN_SLOT_SIZE.h);
+    drawControlDeck(c);
+    drawMeterFrame(c);
   }
 
   private renderHeader(ctx: Ctx): void {
@@ -359,6 +405,7 @@ export class GameScene implements Scene {
       color: COLORS.textDim,
       weight: '700',
     });
+    drawLastShot(ctx, this.lastShot, { x: DECK_COL, y: BOARD_BOTTOM + 168 });
   }
 
   private renderCoin(ctx: Ctx, coin: CoinState): void {

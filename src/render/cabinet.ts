@@ -147,8 +147,12 @@ function roundRectPath(
   ctx.closePath();
 }
 
-/** ガラスの映り込み。盤面の中身をすべて描いたあとに重ねる */
-export function drawGlass(ctx: Ctx, t: number): void {
+/**
+ * ガラスの映り込み。盤面の中身をすべて描いたあとに重ねる。
+ * 全画面のグラデーションを何枚も重ねるのでラスタライズが重い。
+ * 動かさず、キャッシュ側で 1 度だけ描くこと。
+ */
+export function drawGlass(ctx: Ctx): void {
   withClip(
     ctx,
     () => roundRect(ctx, BOARD_LEFT, BOARD_TOP, BOARD_W, BOARD_H, 12),
@@ -157,19 +161,18 @@ export function drawGlass(ctx: Ctx, t: number): void {
       ctx.save();
       ctx.translate(BOARD_LEFT, BOARD_TOP);
       ctx.rotate(-0.32);
-      const drift = Math.sin(t * 0.25) * 26;
       ctx.fillStyle = lGrad(ctx, { x: -200, y: 0 }, { x: 320, y: 0 }, [
         [0, alpha('#FFFFFF', 0)],
         [0.5, alpha('#FFFFFF', 0.055)],
         [1, alpha('#FFFFFF', 0)],
       ]);
-      ctx.fillRect(-260 + drift, -420, 520, 1900);
+      ctx.fillRect(-260, -420, 520, 1900);
       ctx.fillStyle = lGrad(ctx, { x: 380, y: 0 }, { x: 520, y: 0 }, [
         [0, alpha('#FFFFFF', 0)],
         [0.5, alpha('#FFFFFF', 0.035)],
         [1, alpha('#FFFFFF', 0)],
       ]);
-      ctx.fillRect(360 + drift, -420, 160, 1900);
+      ctx.fillRect(360, -420, 160, 1900);
       ctx.restore();
 
       // 四隅の落ち込み
@@ -201,12 +204,9 @@ export function drawDepthMarks(ctx: Ctx, depth: number): void {
     roundRect(ctx, x - 4, y - 9, 8, 18, 4);
     paint(ctx, lit ? COLORS.gap : alpha('#000000', 0.45), alpha('#000000', 0.5), 1.5);
     if (lit) {
-      ctx.save();
-      ctx.shadowColor = COLORS.gap;
-      ctx.shadowBlur = 10;
-      roundRect(ctx, x - 4, y - 9, 8, 18, 4);
-      paint(ctx, COLORS.gap, null, 0);
-      ctx.restore();
+      // 光って見せる。shadowBlur は使わず、外側に薄い枠を足すだけにする
+      roundRect(ctx, x - 6, y - 11, 12, 22, 6);
+      paint(ctx, null, alpha(COLORS.gap, 0.35), 2);
     }
   }
 }

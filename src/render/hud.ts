@@ -60,7 +60,8 @@ function trackRect(): { x: number; y: number; w: number; h: number } {
   return { x: METER.x + 20, y: METER.y + 30, w: METER.w - 40, h: METER.h - 54 };
 }
 
-export function drawPowerMeter(ctx: Ctx, pull: number, marks: readonly ShotMark[]): void {
+/** メーターの枠・溝・目盛り。動かないのでキャッシュ側で 1 度だけ描く */
+export function drawMeterFrame(ctx: Ctx): void {
   const t = trackRect();
 
   roundRect(ctx, METER.x, METER.y, METER.w, METER.h, 14);
@@ -93,6 +94,11 @@ export function drawPowerMeter(ctx: Ctx, pull: number, marks: readonly ShotMark[
     ctx.lineWidth = long ? 2 : 1;
     ctx.stroke();
   }
+}
+
+/** 引き量とショットの跡。毎フレーム変わるぶんだけ */
+export function drawPowerMeter(ctx: Ctx, pull: number, marks: readonly ShotMark[]): void {
+  const t = trackRect();
 
   // 過去のショットの跡。新しいものほど濃い
   marks.forEach((m, i) => {
@@ -180,11 +186,12 @@ export function drawPlunger(ctx: Ctx, knobY: number, cooldown: number): void {
   roundRect(ctx, x - 6, springBottom - 10, 12, 26, 6);
   paint(ctx, COLORS.lever, alpha('#000000', 0.5), 1.5);
 
-  // ノブ
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetY = 8;
+  // ノブ。影は半透明の楕円で代用する(shadowBlur はラスタライズが重い)
+  ctx.beginPath();
+  ctx.ellipse(x + 1, knobY + KNOB_R * 0.18, KNOB_R * 0.98, KNOB_R * 0.94, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fill();
+
   circle(ctx, x, knobY, KNOB_R);
   ctx.fillStyle = rGrad(ctx, x - KNOB_R * 0.35, knobY - KNOB_R * 0.4, 2, KNOB_R * 1.6, [
     [0, '#FF8F7A'],
@@ -192,7 +199,6 @@ export function drawPlunger(ctx: Ctx, knobY: number, cooldown: number): void {
     [1, '#7E2A12'],
   ]);
   ctx.fill();
-  ctx.restore();
   paint(ctx, null, alpha('#000000', 0.6), 2.5);
 
   ctx.beginPath();
